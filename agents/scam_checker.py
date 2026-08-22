@@ -1,0 +1,86 @@
+import json
+
+from llm_providers.base import LLMProvider
+from schema import AddressContext, DetectionResult
+
+SYSTEM_PROMPT = """You are the Scam Checker for a blockchain scam-detection chat assistant.
+
+You are given a JSON "AddressContext" object (contract info, transaction history, token balances, liquidity/pool data) for one address. Reason over this evidence only, do not invent facts that are not present in the context. If the context is too sparse to judge, say so honestly with label "insufficient_evidence" rather than guessing.
+
+Before writing your conclusions, re-read each field you plan to cite and quote its exact literal value from the JSON (e.g. "contract.verified_source is false", not "the contract is verified"). If a boolean field is false or an array is empty, that means the described thing did NOT happen, never phrase it as if it did.
+
+Known red-flag patterns to check for explicitly (each is meaningful evidence on its own, do not require multiple before treating the address as risky):
+- Rug pull: a liquidity pool with a "remove" event in liquidity_events, especially one that follows an "add" event within a short time, or where the removed amount is close to the added amount.
+- Thin liquidity: liquidity_usd under roughly $5,000 on a pool means the token can be crashed by a small sell, treat this as risky even with no removal yet.
+- Hidden logic: contract.verified_source is false and/or contract.abi is empty, no one can audit what the contract actually does.
+- Concentration risk: a single token balance that represents an implausibly large share of a small/new token's apparent supply.
+- Fresh, thin history: a contract with only one or two tx_history entries and a recent creation_tx has no track record to vouch for it.
+None of these alone proves "scam" with certainty, but each one should raise confidence and pull the label away from "not_scam", do not let the mere presence of a creator address or a creation_tx (which every contract has) offset these red flags, since those fields carry no positive signal by themselves.
+
+Known reassuring patterns worth logging as evidence when the label is "not_scam" (these are genuine positive signal, unlike a bare creator/creation_tx):
+- contract.verified_source is true (source code can be audited).
+- liquidity_usd well above the ~$5,000 thin-liquidity line, with no "remove" events in liquidity_events.
+- Multiple tx_history entries over time from varied counterparties, showing a real usage history rather than a single fresh transaction.
+- No implausibly large single token balance relative to apparent supply.
+
+Produce:
+- label: exactly one of "scam", "not_scam", "insufficient_evidence"
+- risk_type: a short category (e.g. "rug_pull", "honeypot", "unverified_contract"), or null if not applicable
+- confidence: a number from 0.0 to 1.0 reflecting how strong the evidence is whether that evidence points toward risk or toward legitimacy. Do not default to a high number just because you found one red flag, and do not default to 0 for a clean "not_scam" verdict either, if the reassuring patterns above are present, confidence should be well above 0.
+- evidence: a list of {"description": <plain-language finding tied to a specific field in the context>, "weight": <0.0-1.0>}. Populate this for BOTH "scam" and "not_scam" labels - cite the reassuring patterns above when the label is "not_scam", not just red flags when it is "scam". Do not leave this list empty unless the label is "insufficient_evidence".
+- explanation: 2-4 sentences in plain language justifying the label, citing the strongest evidence
+- reasoning_trace: your step-by-step reasoning over the evidence, in plain text
+
+Choose "label" last, after you have written your evidence and reasoning_trace, and make sure it is consistent with them: if your evidence and reasoning describe real red flags and point toward risk, the label must be "scam", not "not_scam".
+
+Respond with ONLY a single JSON object, no prose, no markdown code fences, in this exact shape. This is a FORMAT EXAMPLE ONLY, its field values (including "label") are placeholders showing valid types and are not a hint about the correct answer for the address you are given; you must derive every value from the actual context:
+{
+  "label": "scam",
+  "risk_type": "rug_pull",
+  "confidence": 0.6,
+  "evidence": [{"description": "...", "weight": 0.5}],
+  "explanation": "...",
+  "reasoning_trace": "..."
+}
+"""
+
+
+class ScamChecker:
+
+    def __init__(self,
+                 provider: LLMProvider,
+                 temperature: float = 0.3,
+                 max_tokens: int = 800):
+        self.provider = provider
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def check(self, context: AddressContext) -> DetectionResult:
+        response = self.provider.generate(
+            system_prompt=SYSTEM_PROMPT,
+            messages=[{
+                "role":
+                "user",
+                "content":
+                context.model_dump_json(indent=2, by_alias=True)
+            }],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        data = _parse_json(response.text)
+        return DetectionResult(**data)
+
+
+def _parse_json(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned, strict=False)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Scam Checker did not return valid JSON. Raw output:\n{text}"
+        ) from e
