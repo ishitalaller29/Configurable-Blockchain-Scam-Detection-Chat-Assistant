@@ -1,0 +1,131 @@
+* { box-sizing: border-box; }
+ 
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f4f5f6;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+}
+ 
+.frame {
+  width: 100%;
+  max-width: 640px;
+}
+ 
+.hero {
+  background: #ffffff;
+  border: 1px solid #dfe2e6;
+  border-radius: 10px;
+  padding: 56px 48px;
+  text-align: center;
+}
+ 
+.logo-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+ 
+.logo-text {
+  font-size: 26px;
+  font-weight: bold;
+  color: #14213d;
+  letter-spacing: -0.3px;
+}
+ 
+.purpose {
+  font-size: 20px;
+  color: #33404f;
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+ 
+.subline {
+  font-size: 15px;
+  color: #6b7684;
+  margin: 0 0 32px;
+}
+ 
+.btn-start {
+  background: #1f3a5f;
+  color: #fff;
+  border: none;
+  padding: 14px 36px;
+  font-size: 16px;
+  font-weight: bold;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+ 
+.btn-start:hover {
+  background: #16294a;
+}
+ 
+.btn-start:focus-visible {
+  outline: 2px solid #1f3a5f;
+  outline-offset: 2px;
+}
+ 
+.cap-link {
+  color: #1f3a5f;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 16px;
+  display: block;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+ 
+.cap-link:focus-visible {
+  outline: 2px solid #1f3a5f;
+  outline-offset: 2px;
+}
+ 
+.cap-grid {
+  margin-top: 36px;
+  text-align: left;
+}
+ 
+.cap-card {
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  padding: 18px 22px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 12px;
+  background: #fbfbfc;
+}
+ 
+.cap-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  background: #eef1f4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+ 
+.cap-title {
+  font-size: 15px;
+  font-weight: bold;
+  color: #14213d;
+  margin: 0 0 4px;
+}
+ 
+.cap-desc {
+  font-size: 13px;
+  color: #6b7684;
+  margin: 0;
+}
