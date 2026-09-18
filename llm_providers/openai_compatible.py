@@ -42,7 +42,7 @@ class OpenAICompatibleProvider(LLMProvider):
             if response_format is None:
                 raise
             response = self._create(full_messages, temperature, max_tokens,
-                                    None, frequency_penalty)
+                                    None, 0.0)
 
         text = response.choices[0].message.content or ""
         return LLMResponse(text=text, raw_response=response)

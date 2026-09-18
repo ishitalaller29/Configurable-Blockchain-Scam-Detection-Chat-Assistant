@@ -101,7 +101,10 @@ class ChatSession:
             self.history = self.history[-self.max_history_messages:]
 
     def _send_window(self) -> List[Dict[str, str]]:
-        return self.history[-self.send_window_messages:]
+        window = self.history[-self.send_window_messages:]
+        if window and window[0]["role"] == "assistant":
+            window = window[1:]
+        return window
 
     def handle_message(self, user_text: str) -> TurnResult:
         self._remember("user", user_text)
@@ -131,7 +134,13 @@ class ChatSession:
             detection_result = self.sc.check(context)
             reply = summarize_detection(detection_result)
 
-        self._remember("assistant", reply)
+        remembered = reply
+        if detection_result is not None and detection_result.evidence:
+            evidence_lines = "\n".join(
+                f"- {e.description} (weight {e.weight:.2f})"
+                for e in detection_result.evidence)
+            remembered = f"{reply}\n\nEvidence behind this verdict:\n{evidence_lines}"
+        self._remember("assistant", remembered)
         return TurnResult(reply=reply,
                           ba_output=ba_output,
                           detection_result=detection_result)

@@ -6,13 +6,13 @@ from schema import BusinessAnalyserOutput
 
 SYSTEM_PROMPT = """You are the Business Analyser for a blockchain scam-detection chat assistant.
 
-You are shown the full conversation so far (user and assistant turns), ending in the latest user message. Use earlier turns to resolve references the latest message makes to things mentioned before - e.g. if the user previously gave an address and now asks "what chain is that on" or "is it still risky", resolve "that"/"it" to the address from the earlier turn instead of treating the new message as if it appeared alone. Only the latest user message is the thing you are actually answering; earlier turns are context for resolving it.
+You are shown the recent conversation (the last several user and assistant turns, not necessarily everything since the chat began), ending in the latest user message. Use earlier turns to resolve references the latest message makes to things mentioned before - e.g. if the user previously gave an address and now asks "what chain is that on" or "is it still risky", resolve "that"/"it" to the address from the earlier turn instead of treating the new message as if it appeared alone. Only the latest user message is the thing you are actually answering; earlier turns are context for resolving it.
 
 Even though your own output below is structured JSON, any text you write into "direct_response" is what the user actually reads in the chat. Write it the way a knowledgeable person would actually talk, not like a form field: plain everyday language, contractions where they'd naturally occur, no stiff or robotic phrasing. Vary your sentence openers instead of starting every reply the same way, and don't just restate the user's question back at them before answering it.
 
 For the latest user message, you must:
 1. Decide if it is in-scope: a question about a specific blockchain address, contract, token, or transaction (scam check, info lookup, or a general blockchain question). Anything unrelated to blockchain (e.g. "what's the weather") is out of scope.
-2. If in scope, classify request_type as exactly one of: "scam_check", "address_info" "general_question". A message asking you to explain, justify, or recap something you (the assistant) already said earlier in this conversation - e.g. "why did you say that's a scam", "how did you decide this was a scam_check", "what made you classify it that way" - is a "general_question" about your own prior turn, not a new scam_check or address_info request, even though it uses words like "scam" or a field name. Only classify as scam_check/address_info when the user wants a fresh judgment or lookup, not when they're asking you to account for one you already gave.
+2. If in scope, classify request_type as exactly one of: "scam_check", "address_info", "general_question". A message asking you to explain, justify, or recap something you (the assistant) already said earlier in this conversation - e.g. "why did you say that's a scam", "how did you decide this was a scam_check", "what made you classify it that way" - is a "general_question" about your own prior turn, not a new scam_check or address_info request, even though it uses words like "scam" or a field name. Only classify as scam_check/address_info when the user wants a fresh judgment or lookup, not when they're asking you to account for one you already gave.
 3. For "scam_check" or "address_info": extract raw_input as {"type": one of ["address","token_name","tx_hash","contract","unknown"], "value": <string taken from the current or an earlier message>}. If you cannot confidently identify a concrete input even after checking earlier turns, set type to "unknown"; never invent an address that isn't in the conversation.
 4. For "address_info": additionally set requested_fields to a list drawn from ["chain","contract","tx_history","tokens","liquidity"], covering whatever the message is actually asking about (e.g. "what chain is that on" -> ["chain"]; "is the contract verified" -> ["contract"]; "tell me everything about it" -> all five). Leave direct_response null - the field values are filled in downstream, not by you.
 5. No detector is currently configured, so always set: selected_detector: null, detector_configured: false, required_input_type: "address_with_context", needs_resolution: false, resolution_plan: [].
@@ -68,21 +68,23 @@ Example for a meta-question about your own prior turn ("What made you think this
 
 
 class BusinessAnalyser:
-    def __init__(self, provider: LLMProvider, temperature: float = 0.3, max_tokens: int = 800):
+
+    def __init__(self,
+                 provider: LLMProvider,
+                 temperature: float = 0.3,
+                 max_tokens: int = 800):
         self.provider = provider
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-    def analyse(self, messages: List[Dict[str, str]]) -> BusinessAnalyserOutput:
+    def analyse(self, messages: List[Dict[str,
+                                          str]]) -> BusinessAnalyserOutput:
         response = self.provider.generate(
             system_prompt=SYSTEM_PROMPT,
             messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             response_schema=BusinessAnalyserOutput,
-            # Discourages the small local model from falling back to
-            # repeating recent conversation content verbatim when a message
-            # doesn't clearly fit a known request type.
             frequency_penalty=0.3,
         )
         data = _parse_json(response.text)
