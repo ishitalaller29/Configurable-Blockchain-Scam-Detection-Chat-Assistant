@@ -1,7 +1,20 @@
 import json
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
 
 from llm_providers.base import LLMProvider
-from schema import AddressContext, DetectionResult
+from schema import AddressContext, DetectionResult, Evidence
+
+
+class ScamCheckerReply(BaseModel):
+    label: Literal["scam", "not_scam", "insufficient_evidence"]
+    risk_type: Optional[str]
+    confidence: float
+    evidence: List[Evidence]
+    explanation: str
+    reasoning_trace: Optional[str] = None
+
 
 SYSTEM_PROMPT = """You are the Scam Checker for a blockchain scam-detection chat assistant.
 
@@ -66,7 +79,7 @@ class ScamChecker:
             }],
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            response_schema=DetectionResult,
+            response_schema=ScamCheckerReply,
             frequency_penalty=0.5,
         )
         data = _parse_json(response.text)
