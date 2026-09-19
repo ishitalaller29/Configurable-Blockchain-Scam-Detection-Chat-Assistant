@@ -1,7 +1,20 @@
 import json
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
 
 from llm_providers.base import LLMProvider
-from schema import AddressContext, DetectionResult
+from schema import AddressContext, DetectionResult, Evidence
+
+
+class ScamCheckerReply(BaseModel):
+    label: Literal["scam", "not_scam", "insufficient_evidence"]
+    risk_type: Optional[str]
+    confidence: float
+    evidence: List[Evidence]
+    explanation: str
+    reasoning_trace: Optional[str] = None
+
 
 SYSTEM_PROMPT = """You are the Scam Checker for a blockchain scam-detection chat assistant.
 
@@ -28,8 +41,8 @@ Produce:
 - risk_type: a short category (e.g. "rug_pull", "honeypot", "unverified_contract"), or null if not applicable
 - confidence: a number from 0.0 to 1.0 reflecting how strong the evidence is whether that evidence points toward risk or toward legitimacy. Do not default to a high number just because you found one red flag, and do not default to 0 for a clean "not_scam" verdict either, if the reassuring patterns above are present, confidence should be well above 0.
 - evidence: a list of {"description": <plain-language finding tied to a specific field in the context>, "weight": <0.0-1.0>}. Populate this for BOTH "scam" and "not_scam" labels - cite the reassuring patterns above when the label is "not_scam", not just red flags when it is "scam". Do not leave this list empty unless the label is "insufficient_evidence".
-- explanation: 2-4 sentences in plain language justifying the label, citing the strongest evidence
-- reasoning_trace: your step-by-step reasoning over the evidence, in plain text
+- explanation: 3-5 sentences total. The first 2-4 sentences give your findings in a natural conversational tone, as if you were telling the user directly what you found - not a dry technical citation dump. Still ground them in the strongest evidence and stay accurate to the literal field values, just phrase it the way a person would explain it out loud rather than restating field names. The final sentence is one short offer that keeps the conversation open rather than landing as a closed verdict, tied to something specific in this address's evidence - e.g. offering to dig into the particular red flag you found, walk through what a reassuring pattern would have looked like here, or check a related address that appears in the context.
+- reasoning_trace: your step-by-step reasoning over the evidence, in plain text, 3-6 short sentences. Do not repeat a point you have already made, and do not restate "explanation" - move on once each piece of evidence has been considered once.
 
 Choose "label" last, after you have written your evidence and reasoning_trace, and make sure it is consistent with them: if your evidence and reasoning describe real red flags and point toward risk, the label must be "scam", not "not_scam".
 
@@ -66,6 +79,8 @@ class ScamChecker:
             }],
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            response_schema=ScamCheckerReply,
+            frequency_penalty=0.5,
         )
         data = _parse_json(response.text)
         return DetectionResult(**data)

@@ -4,7 +4,7 @@ from llm_providers.openai_compatible import OpenAICompatibleProvider
 LLM_CONFIG = dict(
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     api_key="not-needed",
-    model="llama3.1",
+    model=os.getenv("OLLAMA_MODEL", "llama3.1"),
     temperature=0.3,
     max_tokens=800,
 )
