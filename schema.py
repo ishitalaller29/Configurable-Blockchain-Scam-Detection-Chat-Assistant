@@ -20,6 +20,7 @@ class BusinessAnalyserOutput(BaseModel):
     needs_resolution: bool = False
     resolution_plan: List[str] = Field(default_factory=list)
     direct_response: Optional[str] = None
+    requested_fields: List[str] = Field(default_factory=list)
 
 
 class Evidence(BaseModel):

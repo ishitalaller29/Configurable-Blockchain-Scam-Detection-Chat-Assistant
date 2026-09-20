@@ -227,6 +227,23 @@ body {
   margin-bottom: 14px;
   max-width: 88%;
 }
+
+.msg-error {
+  background: #fbe7e7;
+  border-color: #f0b8b8;
+  color: #a02a2a;
+}
+
+.msg-ai-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg-pending .msg-ai-text {
+  color: #6b7684;
+  font-style: italic;
+}
  
 .msg-ai-label {
   display: flex;
@@ -270,6 +287,13 @@ body {
  
 .evidence-list li {
   margin-bottom: 4px;
+}
+
+.evidence-weight {
+  color: #97a0a8;
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  margin-left: 6px;
 }
  
 .evidence-block {
