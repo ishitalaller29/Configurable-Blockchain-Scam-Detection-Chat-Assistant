@@ -1,0 +1,266 @@
+{
+  "//": "Server-side config store: API configs, connectors and the fetcher plan. Week 1 is structure only",
+  "//keys": "A key starting with // is a comment; the loader skips it. A '//calls' block holds a fetcher's planned calls - inert until the prefix is dropped. 'env:NAME' is read from the environment at call time, never a committed secret. {{ ... }} tokens are substituted at call time. status: stub | planned | blocked | live.",
+  "llm_backends": [
+    {
+      "//": "Chatbot runs locally, so Ollama is the only AI backend. Reached over its OpenAI-compatible endpoint, so llm_providers/openai_compatible.py serves it.",
+      "//migration": "Currently built in config.py from OLLAMA_BASE_URL / OLLAMA_MODEL. ",
+      "id": "ollama",
+      "provider": "openai_compatible",
+      "status": "live",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "not-needed",
+      "model": "llama3.1"
+    }
+  ],
+  "agents": [
+    {
+      "//": "Three agents, one backend, a separate system prompt each - routing, judging evidence and explaining someone else's output are different jobs. Prompts live with the agent code; only selection and sampling are config.",
+      "id": "business_analyser",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "live",
+      "implementation": "agents/business_analyser.py",
+      "temperature": 0.3,
+      "max_tokens": 800,
+      "frequency_penalty": 0.3,
+      "job": "Scope gating, request-type classification, input extraction, deciding what downstream work is needed.",
+      "//detector_visibility": "Reads only required_input_type and detector_configured. Never auth/request/response_mapping, never branches on mode; its output has no mode field."
+    },
+    {
+      "id": "scam_checker",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "live",
+      "implementation": "agents/scam_checker.py",
+      "temperature": 0.3,
+      "max_tokens": 800,
+      "frequency_penalty": 0.5,
+      "job": "Judges scam_check from AddressContext when no detector is configured. Returns detection and explanation together, so the Forensic Investigator never runs here."
+    },
+    {
+      "id": "forensic_investigator",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "stub",
+      "implementation": null,
+      "temperature": null,
+      "max_tokens": null,
+      "frequency_penalty": null,
+      "job": "Explains a configured detector's evidence in plain language. Runs only when a detector is configured and is_llm_based is false.",
+      "//faithfulness": "Translation, not a second opinion. It must not re-judge, so a wrong value_map below becomes a confidently wrong explanation."
+    }
+  ],
+  "active_detector": null,
+  "//active_detector": "null = none configured, so scam_check falls through to the Scam Checker. That is what agents/business_analyser.py hardcodes today. Set to an id below to flip detector_configured true.",
+  "detectors": [
+    {
+      "id": "rektradar",
+      "name": "RektRadar",
+      "mode": "generic",
+      "status": "planned",
+      "endpoint": "https://api.rektradar.io/v1/token/{{ address }}",
+      "method": "GET",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": null,
+      "//timeout": "Connector's job, not the mapping layer's. Timeouts and 4xx/5xx fail the same way, without running any mapping.",
+      "//auth": "Free tier is anonymous and needs no key, which is how the evaluation ran. REKTRADAR_API_KEY is not in .env yet - a key is expected in Week 2, so the block is configured ready for it.",
+      "auth": { "type": "header", "header_name": "X-API-Key", "value_template": "{api_key}", "api_key": "env:REKTRADAR_API_KEY" },
+      "request": {
+        "body_template": {}
+      },
+      "response_mapping": {
+        "label": {
+          "//": "Score is numeric, not a word, so ranges derive the enum; first match wins. Fallback covers 40-69 and flags containing insufficient_data.",
+          "path": "$.score",
+          "ranges": [
+            { "gte": 70, "value": "scam" },
+            { "lt": 40, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "//": "0-100 to 0-1, clamped. Present-but-non-numeric is a MappingError, not a silent default.",
+          "path": "$.score",
+          "scale": 100
+        },
+        "evidence": {
+          "//": "Unknown code -> {description: raw code, weight: default_weight}.",
+          "mode": "code_list",
+          "list_path": "$.flags",
+          "default_weight": 0.3,
+          "codes": {
+            "honeypot": { "description": "Token can be bought but not sold; funds get trapped.", "weight": 0.95 },
+            "sell_failed": { "description": "Buys succeed but sells revert — classic honeypot.", "weight": 0.9 },
+            "lp_not_locked": { "description": "Liquidity is neither burned nor locked, so it can be pulled.", "weight": 0.6 },
+            "unrestricted_mint": { "description": "Supply can be minted with no access control.", "weight": 0.7 },
+            "no_renounce_ownership": { "description": "The deployer still controls the contract.", "weight": 0.4 },
+            "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 }
+          }
+        },
+        "//risk_type": "Unmapped on purpose - RektRadar has no category field, so it stays null rather than guessed. Documented limitation."
+      },
+      "//field_test": "Free-tier evaluation: a fake or malformed address returns a normal low-risk result scoring 0 with NO error, so validate address format before calling or a fake address reads as safe. Score alone is not enough; read flags too. The API's own confidence field was 0 even on a clear scam, hence confidence is derived from score."
+    },
+    {
+      "//no_mapping": "Deliberately no request or response_mapping. The template's shared schema.py already emits DetectionResult, so the mapping layer never loads in template mode.",
+      "//endpoint": "Loopback for dev. Config validation rejects non-https endpoints at save time, so the validator needs a localhost exemption or this will not save.",
+      "id": "template_mock",
+      "name": "MyTemplateDetector",
+      "mode": "template",
+      "status": "stub",
+      "endpoint": "http://localhost:9000/detect",
+      "method": "POST",
+      "required_input_type": "address_with_context",
+      "is_llm_based": false,
+      "timeout_seconds": null
+    }
+  ],
+  "data_sources": [
+    {
+      "//": "Which API backs which fetcher. Endpoints and constraints only, no credentials.",
+      "//traps": "Two response shapes: account/contract/token return status+message, proxy is JSON-RPC and returns neither, so proxy success is result-vs-error presence. Applying the status check to proxy marks good responses as failed. HTTP 200 is not data: txlist with no transactions returns status '0' / 'No transactions found', a valid empty result; getsourcecode on an unverified contract still returns status '1' / 'OK' and the only tell is SourceCode == ''.",
+      "//api_key": "In .env. Missing key must fail immediately, not continue as None.",
+      "id": "etherscan",
+      "status": "planned",
+      "base_url": "https://api.etherscan.io/v2/api",
+      "chain_id": 1,
+      "api_key": "env:ETHERSCAN_API_KEY",
+      "rate_limit": { "calls_per_second": 5, "calls_per_day": 100000 },
+      "backs": ["contract_fetcher", "tx_history_fetcher", "token_fetcher", "tx_hash_resolver_fetcher"]
+    },
+    {
+      "//decision_needed": "Intended liquidity source, no API key needed, but no project document records an endpoint path. Must be read off DexScreener's own docs before liquidity_fetcher can be written.",
+      "id": "dexscreener",
+      "status": "blocked",
+      "base_url": null,
+      "auth": "none",
+      "backs": ["liquidity_fetcher"]
+    },
+    {
+      "//decision_needed": "Open: Etherscan token search or a token list API such as CoinGecko. Best-effort by nature, so ambiguous matches are flagged, not guessed.",
+      "id": "token_name_source",
+      "status": "blocked",
+      "base_url": null,
+      "backs": ["token_name_resolver_fetcher"]
+    }
+  ],
+  "fetchers": [
+    {
+      "//": "Four context fetchers plus two resolvers. Each independently callable and independently failable, so one failure leaves the pipeline running on partial context. Each writes fetcher_provenance: which field it supplied and when.",
+      "//invocation": "Triggered conditionally by the Business Analyser, never all at once. scam_check: a resolver when raw input type does not match what is required, then context fetchers when required_input_type is address_with_context - always true on the Scam Checker path. address_info: only fetchers matching requested_fields.",
+      "id": "contract_fetcher",
+      "data_source": "etherscan",
+      "populates": ["contract"],
+      "status": "planned",
+      "//calls": [
+        {
+          "module": "contract",
+          "action": "getsourcecode",
+          "params": { "address": "{{ address }}" },
+          "yields": "SourceCode, ABI, ContractName, CompilerVersion",
+          "//": "verified_source = SourceCode != ''. Unverified returns SourceCode '' and the literal string 'Contract source code not verified' as the ABI."
+        },
+        {
+          "module": "proxy",
+          "action": "eth_getCode",
+          "params": { "address": "{{ address }}", "tag": "latest" },
+          "yields": "runtime bytecode",
+          "//": "Runtime, not constructor bytecode - creation bytecode is silently wrong for any contract with a constructor. is_contract is true only if code is neither 0x nor an EIP-7702 delegation (23 bytes, ef0100 + 20-byte address), which is still a wallet."
+        },
+        {
+          "module": "contract",
+          "action": "getcontractcreation",
+          "params": { "contractaddresses": "{{ address }}" },
+          "yields": "creator, creation_tx",
+          "//": "Up to 5 addresses per call."
+        }
+      ]
+    },
+    {
+      "id": "tx_history_fetcher",
+      "data_source": "etherscan",
+      "populates": ["tx_history"],
+      "status": "planned",
+      "//calls": [
+        {
+          "module": "account",
+          "action": "txlist",
+          "params": { "address": "{{ address }}", "page": 1, "offset": 100, "sort": "desc" },
+          "yields": "hash, from, to, value, timestamp, method",
+          "//": "10,000 records per call max, so longer history needs page/offset. Zero-tx address returns status '0' / 'No transactions found' - not an error."
+        }
+      ]
+    },
+    {
+      "id": "token_fetcher",
+      "data_source": "etherscan",
+      "populates": ["tokens"],
+      "status": "planned",
+      "//calls": [
+        {
+          "module": "account",
+          "action": "tokentx",
+          "params": { "address": "{{ address }}", "page": 1, "offset": 100 },
+          "yields": "tokenName, tokenSymbol, tokenDecimal, contractAddress - all the metadata tokens[] needs",
+          "//": "No free way to list tokens held: tokeninfo is Pro, tokenbalance needs a known contract. Balance = sum incoming minus outgoing per contractAddress. That is an estimate and must be flagged as one."
+        },
+        {
+          "module": "account",
+          "action": "tokenbalance",
+          "params": { "contractaddress": "{{ token_contract_address }}", "address": "{{ address }}", "tag": "latest" },
+          "optional": true,
+          "//": "Only once a specific token contract is known. Optional cross-check, not a primary call."
+        }
+      ]
+    },
+    {
+      "id": "liquidity_fetcher",
+      "data_source": "dexscreener",
+      "populates": ["liquidity"],
+      "status": "blocked",
+      "//calls": [],
+      "//blocked": "No documented endpoint, so the call shape cannot be written without inventing it. The Scam Checker's rug-pull and thin-liquidity checks read liquidity_usd and liquidity_events, and are on fake_data.py until this lands."
+    },
+    {
+      "id": "tx_hash_resolver_fetcher",
+      "data_source": "etherscan",
+      "populates": [],
+      "role": "input_resolution",
+      "status": "planned",
+      "//role": "Resolves input, does not build context. Runs when raw_input.type is tx_hash but an address is required. Output is the address the context fetchers then run against.",
+      "//calls": [
+        {
+          "module": "proxy",
+          "action": "eth_getTransactionByHash",
+          "params": { "txhash": "{{ tx_hash }}" },
+          "yields": "blockHash, from, to, value, input",
+          "//": "JSON-RPC: numeric fields are hex, not the decimal strings txlist uses. Do not parse as decimal."
+        },
+        {
+          "module": "proxy",
+          "action": "eth_getTransactionReceipt",
+          "params": { "txhash": "{{ tx_hash }}" },
+          "conditional": true,
+          "//": "Only for contract-creation txs, where 'to' is null and the deployed address is the receipt's contractAddress."
+        }
+      ]
+    },
+    {
+      "id": "token_name_resolver_fetcher",
+      "data_source": "token_name_source",
+      "populates": [],
+      "role": "input_resolution",
+      "status": "blocked",
+      "//calls": [],
+      "//blocked": "See data_sources.token_name_source. A name matching several contracts stops the pipeline with a clarifying question; the mapping layer is never reached."
+    }
+  ],
+  "cache": {
+    "//": "Explorer APIs are rate limited, so results are held per address for a short TTL and follow-up turns reuse them. 5-10 min is the target; 600 is the top of it. Tune in Week 2.",
+    "enabled": true,
+    "ttl_seconds": 600,
+    "key": ["chain", "address", "fetcher"]
+  }
+}
