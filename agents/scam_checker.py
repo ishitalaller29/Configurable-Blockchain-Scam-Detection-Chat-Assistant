@@ -62,7 +62,7 @@ class ScamChecker:
 
     def __init__(self,
                  provider: LLMProvider,
-                 temperature: float = 0.3,
+                 temperature: float = 0.0,
                  max_tokens: int = 800):
         self.provider = provider
         self.temperature = temperature
@@ -83,7 +83,15 @@ class ScamChecker:
             frequency_penalty=0.5,
         )
         data = _parse_json(response.text)
+        data["confidence"] = _confidence_from_evidence(data.get("evidence", []))
         return DetectionResult(**data)
+
+
+def _confidence_from_evidence(evidence: list[dict]) -> float:
+    if not evidence:
+        return 0.0
+    total = sum(item.get("weight", 0.0) for item in evidence)
+    return min(1.0, round(total, 2))
 
 
 def _parse_json(text: str) -> dict:
