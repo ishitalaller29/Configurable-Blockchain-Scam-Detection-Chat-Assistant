@@ -39,3 +39,20 @@ llm_providers/
   openai_compatible.py             adapter for any OpenAI-compatible endpoint 
 ```
 
+## WireFrames
+<b>Source: </b>https://miro.com/app/board/uXjVGwYXzDk=/ <br>
+Final Wireframe Designs are listed under the following subheadings: <br>
+<b>Starting Page:</b> <br>
+Usability Testing Pages - REFINED <br>
+<ul>
+  <li><b>Usability Testing Pages - REFINED:</b> Updated starting page</li>
+</ul> 
+<br>
+
+<b>Chat Box Page:</b> <br>
+<ul>
+  <li><b>Usability Testing Pages - REFINED:</b> Updated chatbox page (Normal users)</li>
+  <li><b>Usability Testing Pages - REFINED:</b> Updated chatbox page (Admin users)</li>
+  <li><b>Usability Testing Pages - REFINED:</b> Fallback prompt use case --> Fallback Prompt refers to the user expertise and use case extraction </li>
+  <li><b>Usability Testing Pages - REFINED (Extended):</b> Display the refinements of previous beginner, intermediate, professional use cases, including the general output data format</li>
+</ul> 
