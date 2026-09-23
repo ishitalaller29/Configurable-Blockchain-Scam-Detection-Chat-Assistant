@@ -123,7 +123,7 @@
       "//traps": "Two response shapes: account/contract/token return status+message, proxy is JSON-RPC and returns neither, so proxy success is result-vs-error presence. Applying the status check to proxy marks good responses as failed. HTTP 200 is not data: txlist with no transactions returns status '0' / 'No transactions found', a valid empty result; getsourcecode on an unverified contract still returns status '1' / 'OK' and the only tell is SourceCode == ''.",
       "//api_key": "In .env. Missing key must fail immediately, not continue as None.",
       "id": "etherscan",
-      "status": "planned",
+      "status": "live",
       "base_url": "https://api.etherscan.io/v2/api",
       "chain_id": 1,
       "api_key": "env:ETHERSCAN_API_KEY",
