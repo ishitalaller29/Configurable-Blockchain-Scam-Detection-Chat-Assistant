@@ -153,7 +153,7 @@
       "id": "contract_fetcher",
       "data_source": "etherscan",
       "populates": ["contract"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "contract",
@@ -182,7 +182,7 @@
       "id": "tx_history_fetcher",
       "data_source": "etherscan",
       "populates": ["tx_history"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "account",
@@ -197,12 +197,12 @@
       "id": "token_fetcher",
       "data_source": "etherscan",
       "populates": ["tokens"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "account",
           "action": "tokentx",
-          "params": { "address": "{{ address }}", "page": 1, "offset": 100 },
+          "params": { "address": "{{ address }}", "page": 1, "offset": 1000, "sort": "desc" },
           "yields": "tokenName, tokenSymbol, tokenDecimal, contractAddress - all the metadata tokens[] needs",
           "//": "No free way to list tokens held: tokeninfo is Pro, tokenbalance needs a known contract. Balance = sum incoming minus outgoing per contractAddress. That is an estimate and must be flagged as one."
         },
@@ -228,7 +228,7 @@
       "data_source": "etherscan",
       "populates": [],
       "role": "input_resolution",
-      "status": "planned",
+      "status": "live",
       "//role": "Resolves input, does not build context. Runs when raw_input.type is tx_hash but an address is required. Output is the address the context fetchers then run against.",
       "//calls": [
         {
