@@ -3,14 +3,16 @@ from typing import Dict, List, Optional
 
 from agents.business_analyser import BusinessAnalyser
 from agents.scam_checker import ScamChecker
-from fake_data import build_fake_address_context
+from fetchers.etherscan import InvalidInputError
+from fetchers.fetcher_output import get_address_context, is_supported
+from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
 from schema import AddressContext, BusinessAnalyserOutput, DetectionResult
 
 LABEL_WORDS = {
-    "scam": "Risky",
-    "not_scam": "Looks fine",
-    "insufficient_evidence": "Inconclusive",
+    "scam": "Scam",
+    "not_scam": "Not scam",
+    "insufficient_evidence": "Suspicious",
 }
 
 _INFO_FIELDS = ("chain", "contract", "tx_history", "tokens", "liquidity")
@@ -40,6 +42,12 @@ _CHAIN_NAMES = {
 }
 
 _THIN_LIQUIDITY_USD = 5000
+_MAX_TOKENS_LISTED = 5
+
+
+def _invalid_input_reply(error: InvalidInputError) -> str:
+    # A typo'd address/hash is the user's to fix, so answer it instead of failing the turn.
+    return f"That doesn't look quite right - {error}. Could you double-check it and send it again?"
 
 
 def _chain_name(chain: str) -> str:
@@ -73,10 +81,14 @@ def _say_tx_history(context: AddressContext) -> str:
         return "There's no transaction history on record for it."
     latest = context.tx_history[-1]
     method = latest.method or "transfer"
-    movement = (f"a {method} of {latest.value} from {latest.from_} "
+    movement = (f"a {method} of {latest.value} ETH from {latest.from_} "
                 f"to {latest.to}")
     if len(context.tx_history) == 1:
         return f"There's just one transaction on record: {movement}."
+    if len(context.tx_history) >= MAX_TXS:
+        return (
+            f"It's busy - I pulled its {MAX_TXS} most recent transactions; "
+            f"the latest is {movement}.")
     return (f"There are {len(context.tx_history)} transactions on record; "
             f"the most recent is {movement}.")
 
@@ -85,9 +97,16 @@ def _say_tokens(context: AddressContext) -> str:
     if not context.tokens:
         return "It isn't holding any token balances."
     held = [f"{t.balance} {t.symbol}" for t in context.tokens]
+    # Worked out from transfer history, so said as an estimate.
     if len(held) == 1:
-        return f"It's holding {held[0]}."
-    return f"It's holding {', '.join(held[:-1])} and {held[-1]}."
+        return f"From its transfer history, it looks to be holding {held[0]}."
+    if len(held) > _MAX_TOKENS_LISTED:
+        shown = ", ".join(held[:_MAX_TOKENS_LISTED])
+        return (
+            f"From its transfer history, it looks to be holding {len(held)} different tokens, "
+            f"including {shown} (a long list like this is often mostly unsolicited airdrops)."
+        )
+    return f"From its transfer history, it looks to be holding {', '.join(held[:-1])} and {held[-1]}."
 
 
 def _say_liquidity(context: AddressContext) -> str:
@@ -211,25 +230,29 @@ class ChatSession:
         if not ba_output.in_scope:
             reply = ba_output.direct_response or "That's outside what I can help with."
         elif ba_output.request_type == "address_info":
-            if ba_output.raw_input is None or ba_output.raw_input.type == "unknown":
+            if not is_supported(ba_output.raw_input):
                 reply = "I couldn't pin down which address, token, or transaction you mean - could you share the exact one?"
             else:
-                context = build_fake_address_context(ba_output.raw_input.value,
-                                                     chain=ba_output.chain
-                                                     or "ethereum")
-                reply = format_address_info(context,
-                                            ba_output.requested_fields)
+                try:
+                    context = get_address_context(ba_output,
+                                                  ba_output.requested_fields)
+                    reply = format_address_info(context,
+                                                ba_output.requested_fields)
+                except InvalidInputError as e:
+                    reply = _invalid_input_reply(e)
         elif ba_output.request_type != "scam_check":
             reply = ba_output.direct_response or "I can't help with that yet."
-        elif ba_output.raw_input is None or ba_output.raw_input.type == "unknown":
+        elif not is_supported(ba_output.raw_input):
             reply = "I couldn't pin down a concrete address, token, or transaction - could you share the exact one you mean?"
         else:
-            context = build_fake_address_context(ba_output.raw_input.value,
-                                                 chain=ba_output.chain
-                                                 or "ethereum")
-            detection_result = self.sc.check(context)
-            detection_source = SOURCE_SCAM_CHECKER
-            reply = summarize_detection(detection_result)
+            try:
+                context = get_address_context(ba_output)
+            except InvalidInputError as e:
+                reply = _invalid_input_reply(e)
+            else:
+                detection_result = self.sc.check(context)
+                detection_source = SOURCE_SCAM_CHECKER
+                reply = summarize_detection(detection_result)
 
         remembered = reply
         if detection_result is not None:
