@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 from agents.business_analyser import BusinessAnalyser
 from agents.scam_checker import ScamChecker
-from fake_data import build_fake_address_context
+from context_builder import build_address_context
 from llm_providers.base import LLMProvider
 from schema import AddressContext, BusinessAnalyserOutput, DetectionResult
 
@@ -214,9 +214,9 @@ class ChatSession:
             if ba_output.raw_input is None or ba_output.raw_input.type == "unknown":
                 reply = "I couldn't pin down which address, token, or transaction you mean - could you share the exact one?"
             else:
-                context = build_fake_address_context(ba_output.raw_input.value,
-                                                     chain=ba_output.chain
-                                                     or "ethereum")
+                context = build_address_context(ba_output.raw_input.value,
+                                                chain=ba_output.chain,
+                                                liquidity_source="dexscreener")
                 reply = format_address_info(context,
                                             ba_output.requested_fields)
         elif ba_output.request_type != "scam_check":
@@ -224,9 +224,9 @@ class ChatSession:
         elif ba_output.raw_input is None or ba_output.raw_input.type == "unknown":
             reply = "I couldn't pin down a concrete address, token, or transaction - could you share the exact one you mean?"
         else:
-            context = build_fake_address_context(ba_output.raw_input.value,
-                                                 chain=ba_output.chain
-                                                 or "ethereum")
+            context = build_address_context(ba_output.raw_input.value,
+                                                chain=ba_output.chain,
+                                                liquidity_source="dexscreener")
             detection_result = self.sc.check(context)
             detection_source = SOURCE_SCAM_CHECKER
             reply = summarize_detection(detection_result)
