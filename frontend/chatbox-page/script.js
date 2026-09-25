@@ -82,9 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ---------- Rendering the backend's response ----------
   const STATUS_TAGS = {
-    scam: { text: 'Risky', className: 'status-scam' },
-    not_scam: { text: 'Looks fine', className: 'status-benign' },
-    insufficient_evidence: { text: 'Inconclusive', className: 'status-insufficient' },
+    scam: { text: 'Scam', className: 'status-scam' },
+    not_scam: { text: 'Not scam', className: 'status-benign' },
+    insufficient_evidence: { text: 'Suspicious', className: 'status-insufficient' },
   };
 
   // Mirrors conversation.SOURCE_WORDS so both front ends name the source identically. Unknown values fall through and render as-is.

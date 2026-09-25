@@ -123,7 +123,7 @@
       "//traps": "Two response shapes: account/contract/token return status+message, proxy is JSON-RPC and returns neither, so proxy success is result-vs-error presence. Applying the status check to proxy marks good responses as failed. HTTP 200 is not data: txlist with no transactions returns status '0' / 'No transactions found', a valid empty result; getsourcecode on an unverified contract still returns status '1' / 'OK' and the only tell is SourceCode == ''.",
       "//api_key": "In .env. Missing key must fail immediately, not continue as None.",
       "id": "etherscan",
-      "status": "planned",
+      "status": "live",
       "base_url": "https://api.etherscan.io/v2/api",
       "chain_id": 1,
       "api_key": "env:ETHERSCAN_API_KEY",
@@ -153,7 +153,7 @@
       "id": "contract_fetcher",
       "data_source": "etherscan",
       "populates": ["contract"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "contract",
@@ -182,7 +182,7 @@
       "id": "tx_history_fetcher",
       "data_source": "etherscan",
       "populates": ["tx_history"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "account",
@@ -197,12 +197,12 @@
       "id": "token_fetcher",
       "data_source": "etherscan",
       "populates": ["tokens"],
-      "status": "planned",
+      "status": "live",
       "//calls": [
         {
           "module": "account",
           "action": "tokentx",
-          "params": { "address": "{{ address }}", "page": 1, "offset": 100 },
+          "params": { "address": "{{ address }}", "page": 1, "offset": 1000, "sort": "desc" },
           "yields": "tokenName, tokenSymbol, tokenDecimal, contractAddress - all the metadata tokens[] needs",
           "//": "No free way to list tokens held: tokeninfo is Pro, tokenbalance needs a known contract. Balance = sum incoming minus outgoing per contractAddress. That is an estimate and must be flagged as one."
         },
@@ -228,7 +228,7 @@
       "data_source": "etherscan",
       "populates": [],
       "role": "input_resolution",
-      "status": "planned",
+      "status": "live",
       "//role": "Resolves input, does not build context. Runs when raw_input.type is tx_hash but an address is required. Output is the address the context fetchers then run against.",
       "//calls": [
         {
