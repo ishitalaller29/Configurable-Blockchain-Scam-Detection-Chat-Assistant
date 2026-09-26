@@ -1,13 +1,19 @@
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
 from agents.scam_checker import ScamChecker
-from fetchers.etherscan import InvalidInputError
+from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
+from fetchers.etherscan import InvalidInputError, UnsupportedChainError
 from fetchers.fetcher_output import get_address_context, is_supported
+from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
-from schema import AddressContext, BusinessAnalyserOutput, DetectionResult
+from schema import (AddressContext, BusinessAnalyserOutput, DetectionResult,
+                    RawInput)
+
+logger = logging.getLogger(__name__)
 
 LABEL_WORDS = {
     "scam": "Scam",
@@ -48,6 +54,80 @@ _MAX_TOKENS_LISTED = 5
 def _invalid_input_reply(error: InvalidInputError) -> str:
     # A typo'd address/hash is the user's to fix, so answer it instead of failing the turn.
     return f"That doesn't look quite right - {error}. Could you double-check it and send it again?"
+
+
+def _unresolved_input_reply(raw_input: Optional[RawInput]) -> str:
+    # ask rather than guess when the input can't be resolved.
+    if raw_input is not None and raw_input.type == "token_name":
+        return (f"I can't look tokens up by name yet, and plenty of tokens "
+                f"share a name like \"{raw_input.value}\", so I'd rather not "
+                "guess which one you mean. Could you paste its contract "
+                "address?")
+    return ("I couldn't pin down a concrete address, token, or transaction - "
+            "could you share the exact one you mean?")
+
+
+def _lookup_error_reply(error: Exception, chain: str) -> str:
+    # The lookup failed before any context existed (, so there's nothing partial to fall back on and say what went wrong and what the user can do.
+    if isinstance(error, InvalidInputError):
+        return _invalid_input_reply(error)
+    if isinstance(error, UnsupportedChainError):
+        return (f"I can only look things up on Ethereum right now, so I "
+                f"can't check it on {_chain_name(chain)}. Is it actually on "
+                "Ethereum? If so, let me know and I'll take a look.")
+    if isinstance(error, TxNotFoundError):
+        return ("I couldn't find that transaction on Ethereum - it may be "
+                "mistyped, still pending, or on another chain. Could you "
+                "double-check the hash, or paste the address you're worried "
+                "about instead?")
+    return ("I couldn't reach the blockchain data source to look that up just "
+            "now. Could you try again in a minute?")
+
+
+# Plain-language names for the context fields, used when saying what couldn't be checked.
+MISSING_FIELD_WORDS = {
+    "contract": "contract details",
+    "tx_history": "transaction history",
+    "tokens": "token balances",
+    "liquidity": "liquidity pool data",
+}
+
+# One round of clarifying questions per address, so the bot can't loop on asking.
+MAX_CLARIFICATION_ROUNDS = 1
+
+# Fixed wording so an insufficient_evidence reply always says so, whatever the LLM's explanation says.
+_INSUFFICIENT_INTRO = "I don't have enough evidence to give a complete verdict on this."
+_FINAL_INSUFFICIENT_INTRO = (
+    "Even with what you've told me, there still isn't enough evidence for a "
+    "firm verdict, so insufficient evidence is my final call on this one.")
+_QUESTIONS_OUTRO = "That would help me give a more accurate answer."
+
+
+def _fallback_questions(context: AddressContext) -> List[str]:
+    # Used when the Scam Checker gives none
+    questions = [
+        "Where did you come across this address - was it sent to you, or "
+        "did you find it yourself?",
+        "Were you asked to send funds, connect your wallet or approve a "
+        "token for it?",
+    ]
+    if context.contract is not None and not context.contract.is_contract:
+        questions[1] = ("It's a plain wallet rather than a contract - if "
+                        "you're really worried about a token, could you "
+                        "paste the token's contract address?")
+    return questions
+
+
+def _with_questions(reply: str, questions: List[str]) -> str:
+    # Asked in plain sentences
+    return reply + "\n\n" + " ".join(questions) + " " + _QUESTIONS_OUTRO
+
+
+def _no_data_reply(context: AddressContext) -> str:
+    return (f"I couldn't reach the blockchain data source for any of the "
+            f"checks on {context.address} just now, so I've got nothing "
+            "on-chain to judge it by, and I'd rather not guess. Try asking "
+            "again in a minute.")
 
 
 def _chain_name(chain: str) -> str:
@@ -155,7 +235,7 @@ def _follow_up(context: AddressContext, fields: List[str]) -> str:
     # Nothing jumped out, so offer whichever field is the natural next one.
     if fields == ["chain"]:
         return "Want me to dig into the contract itself, or check whether it looks risky?"
-    if fields == ["tokens"]:
+    if fields == ["tokens"] and "liquidity" not in missing_fields(context):
         return "Want me to look at the liquidity behind those tokens?"
     if fields == ["tx_history"]:
         if len(context.tx_history) > 1:
@@ -173,9 +253,32 @@ def format_address_info(context: AddressContext,
             fields.append(field)
     fields = fields or list(_INFO_FIELDS)
 
-    parts = [_FIELD_SENTENCES[field](context) for field in fields]
-    parts.append(_follow_up(context, fields))
+    # A field whose fetcher failed is said as "couldn't pull", never through its _say_* sentence - that would read its empty default as "there's none".
+    missing = missing_fields(context)
+    parts = []
+    for field in fields:
+        if field in missing:
+            parts.append(_say_missing(field, missing[field]))
+        else:
+            parts.append(_FIELD_SENTENCES[field](context))
+
+    shown = [f for f in fields if f not in missing]
+    if shown:
+        parts.append(_follow_up(context, shown))
+    elif STATUS_FAILED in missing.values():
+        parts.append("Want me to try again in a minute?")
+    else:
+        parts.append("Anything else you want me to pull up on it?")
     return " ".join(parts)
+
+
+def _say_missing(field: str, status: str) -> str:
+    words = MISSING_FIELD_WORDS.get(field, field)
+    if status == STATUS_FAILED:
+        return (f"I couldn't pull its {words} just now - the data source "
+                "didn't come through, so I can't say either way.")
+    return (f"I can't look up {words} yet - there's no data source hooked "
+            "up for that.")
 
 
 @dataclass
@@ -184,6 +287,10 @@ class TurnResult:
     ba_output: BusinessAnalyserOutput
     detection_result: Optional[DetectionResult] = None
     detection_source: Optional[str] = None
+    # Context fields that couldn't be checked this turn
+    missing_fields: List[str] = field(default_factory=list)
+    # Questions asked this turn because the evidence was insufficient
+    clarifying_questions: List[str] = field(default_factory=list)
 
 
 class ChatSession:
@@ -201,6 +308,10 @@ class ChatSession:
         self.max_history_messages = max_history_messages
         # Only the most recent send_window_messages are actually sent to the LLM per call - local models have a small context window
         self.send_window_messages = send_window_messages
+        # Clarification state, keyed by (chain, address). _awaiting_answer holds the address questions were just asked about, for the next turn only.
+        self._awaiting_answer: Optional[Tuple[str, str]] = None
+        self._rounds_asked: Dict[Tuple[str, str], int] = {}
+        self._user_notes: Dict[Tuple[str, str], List[str]] = {}
 
     def _remember(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content})
@@ -221,38 +332,90 @@ class ChatSession:
             self.history.pop()
             raise
 
+    def _fetch_context(
+        self,
+        ba_output: BusinessAnalyserOutput,
+        requested_fields: Optional[List[str]] = None
+    ) -> Tuple[Optional[AddressContext], Optional[str]]:
+        # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
+        chain = ba_output.chain or "ethereum"
+        try:
+            return get_address_context(ba_output, requested_fields), None
+        except Exception as e:
+            logger.warning("lookup for %s failed: %s", ba_output.raw_input,
+                           type(e).__name__)
+            return None, _lookup_error_reply(e, chain)
+
     def _run_turn(self) -> TurnResult:
+        user_text = self.history[-1]["content"]
+        # Only the turn right after questions were asked can be the answer to them.
+        answering_for = self._awaiting_answer
         ba_output = self.ba.analyse(self._send_window())
 
         detection_result = None
         detection_source = None
+        missing: Dict[str, str] = {}
+        questions: List[str] = []
+        ask_for: Optional[Tuple[str, str]] = None
+        notes_for: Optional[Tuple[str, str]] = None
 
         if not ba_output.in_scope:
             reply = ba_output.direct_response or "That's outside what I can help with."
         elif ba_output.request_type == "address_info":
             if not is_supported(ba_output.raw_input):
-                reply = "I couldn't pin down which address, token, or transaction you mean - could you share the exact one?"
+                reply = _unresolved_input_reply(ba_output.raw_input)
             else:
-                try:
-                    context = get_address_context(ba_output,
-                                                  ba_output.requested_fields)
+                context, reply = self._fetch_context(
+                    ba_output, ba_output.requested_fields)
+                if context is not None:
+                    missing = missing_fields(context)
                     reply = format_address_info(context,
                                                 ba_output.requested_fields)
-                except InvalidInputError as e:
-                    reply = _invalid_input_reply(e)
         elif ba_output.request_type != "scam_check":
             reply = ba_output.direct_response or "I can't help with that yet."
         elif not is_supported(ba_output.raw_input):
-            reply = "I couldn't pin down a concrete address, token, or transaction - could you share the exact one you mean?"
+            reply = _unresolved_input_reply(ba_output.raw_input)
         else:
-            try:
-                context = get_address_context(ba_output)
-            except InvalidInputError as e:
-                reply = _invalid_input_reply(e)
-            else:
-                detection_result = self.sc.check(context)
-                detection_source = SOURCE_SCAM_CHECKER
-                reply = summarize_detection(detection_result)
+            context, reply = self._fetch_context(ba_output)
+            if context is not None:
+                missing = missing_fields(context)
+                key = (context.chain.lower(), context.address.lower())
+                # The user's answer is extra (user-reported) evidence for the address the questions were about. Moving on to a different address is a fresh check, not an answer.
+                notes = self._user_notes.get(key, [])
+                if answering_for == key:
+                    notes = notes + [user_text]
+                    notes_for = key
+
+                can_ask = self._rounds_asked.get(key,
+                                                 0) < MAX_CLARIFICATION_ROUNDS
+                if len(missing) >= len(FETCHERS):
+                    # Nothing on-chain came back, so there's nothing for the Scam Checker to ground a verdict in.
+                    reply = _no_data_reply(context)
+                    questions = _fallback_questions(context)
+                else:
+                    detection_result, questions = self.sc.check(context, notes)
+                    detection_source = SOURCE_SCAM_CHECKER
+                    reply = summarize_detection(detection_result)
+                    if detection_result.label == "insufficient_evidence":
+                        questions = questions or _fallback_questions(context)
+                        intro = (_FINAL_INSUFFICIENT_INTRO if not can_ask
+                                 and notes else _INSUFFICIENT_INTRO)
+                        reply = intro + " " + reply
+
+                if questions and can_ask:
+                    ask_for = key
+                    reply = _with_questions(reply, questions)
+                else:
+                    questions = []
+
+        # State only changes once the turn has succeeded, so a failed turn (rolled back in handle_message) leaves it as it was.
+        if notes_for is not None:
+            self._user_notes[notes_for] = self._user_notes.get(
+                notes_for, []) + [user_text]
+        if ask_for is not None:
+            self._rounds_asked[ask_for] = self._rounds_asked.get(ask_for,
+                                                                 0) + 1
+        self._awaiting_answer = ask_for
 
         remembered = reply
         if detection_result is not None:
@@ -270,4 +433,6 @@ class ChatSession:
         return TurnResult(reply=reply,
                           ba_output=ba_output,
                           detection_result=detection_result,
-                          detection_source=detection_source)
+                          detection_source=detection_source,
+                          missing_fields=list(missing),
+                          clarifying_questions=questions)
