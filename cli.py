@@ -2,7 +2,8 @@ import os
 import sys
 
 from config import build_default_provider, LLM_CONFIG
-from conversation import ChatSession, LABEL_WORDS, SOURCE_WORDS
+from conversation import (ChatSession, LABEL_WORDS, MISSING_FIELD_WORDS,
+                          SOURCE_WORDS)
 
 _RESET = "\033[0m"
 
@@ -33,6 +34,7 @@ def print_turn(turn):
     # Everything below is the structured DetectionResult, which only scam_check turns produce. address_info and general_question replies print as-is.
     detection = turn.detection_result
     if detection is None:
+        _print_missing(turn)
         return
 
     if detection.evidence:
@@ -58,6 +60,14 @@ def print_turn(turn):
     print("\n  Detection details:")
     for name, value in rows:
         print(f"    {name:<11} {value}")
+    _print_missing(turn)
+
+
+def _print_missing(turn):
+    if turn.missing_fields:
+        words = ", ".join(
+            MISSING_FIELD_WORDS.get(f, f) for f in turn.missing_fields)
+        print(f"\n  Not checked (data unavailable): {words}")
 
 
 def print_turn_error(error: Exception):

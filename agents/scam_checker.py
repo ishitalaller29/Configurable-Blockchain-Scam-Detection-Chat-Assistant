@@ -1,8 +1,9 @@
 import json
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel
 
+from fetchers.context_builder import missing_fields
 from llm_providers.base import LLMProvider
 from schema import AddressContext, DetectionResult, Evidence
 
@@ -16,11 +17,15 @@ class ScamCheckerReply(BaseModel):
     reasoning_trace: Optional[str] = None
 
 
+class ClarifyingQuestionsReply(BaseModel):
+    questions: List[str]
+
+
 SYSTEM_PROMPT = """You are the Scam Checker for a blockchain scam-detection chat assistant.
 
 You are given a JSON "AddressContext" object (contract info, transaction history, token balances, liquidity/pool data) for one address. Reason over this evidence only, do not invent facts that are not present in the context. If the context is too sparse to judge, say so honestly with label "insufficient_evidence" rather than guessing.
 
-Before writing your conclusions, re-read each field you plan to cite and quote its exact literal value from the JSON (e.g. "contract.verified_source is false", not "the contract is verified"). If a boolean field is false or an array is empty, that means the described thing did NOT happen, never phrase it as if it did.
+Before writing your conclusions, re-read each field you plan to cite and quote its exact literal value from the JSON (e.g. "contract.verified_source is false", not "the contract is verified"). If a boolean field is false or an array is empty, that means the described thing did NOT happen, never phrase it as if it did. The exception is any field listed in unavailable_fields: it could not be checked, so treat it as unknown - never cite it as evidence either way.
 
 The context is a summary: contract.bytecode_size_bytes replaces the raw bytecode, contract.abi lists function names only (empty when the source is unverified), tx_history shows only the latest entries and tokens only the first few - use tx_history_count, tx_history_counterparties and tokens_count for the totals. tx_history_count tops out at 100 because only the newest 100 transactions are fetched, so 100 means "at least 100". Token balances are estimates from transfer history; a long token list is usually unsolicited airdrops, not evidence about this address.
 
@@ -59,6 +64,23 @@ Respond with ONLY a single JSON object, no prose, no markdown code fences, in th
 }
 """
 
+# Appended only when the address is a plain wallet.
+WALLET_RULE = """Wallets vs contracts: when contract.is_contract is false, the address is a plain wallet, not a contract - source verification, ABI and creator do not apply to it, so never cite them as a red flag. A wallet with no (or almost no) transaction history, no tokens and no user-reported context has nothing to judge either way: an empty history is not evidence of a scam, so use "insufficient_evidence" rather than "scam". For the same reason, never list an empty tx_history or empty tokens as an evidence item in either direction - absence of activity is simply no evidence."""
+
+# Appended only when the user has answered clarifying questions.
+USER_REPORTED_RULE = """User-reported context: "user_reported_context" (present only when the user has answered your earlier clarifying questions) is the user's own account of how they came across this address - e.g. who sent it, what they were promised, what they were asked to do. It is NOT on-chain evidence and cannot be verified. When it is present you must read it and turn each concrete claim in it into its own evidence item: start each such description with "User reports: " and give it a weight of at most 0.3. Check it against well-known scam patterns: unsolicited DMs, guaranteed or outsized returns, "send X and get more back" giveaway/doubling offers, pressure to act fast, being asked to send funds or approve a token to "unlock", "verify" or "claim" something. If it matches one of these, that is a real warning sign even when the on-chain data is empty - use label "scam" (the confidence stays modest because the evidence is user-reported) and explain the pattern, rather than "insufficient_evidence". Say in the explanation which points came from the user and which from the chain."""
+
+# A separate, small call made only for an insufficient_evidence verdict, so the main verdict prompt stays unchanged.
+QUESTIONS_PROMPT = """You help a blockchain scam-detection chat assistant that could not reach a verdict on an address because the evidence was too thin.
+
+You are given the evidence it had (a JSON summary of the address, where unavailable_fields lists checks that could not run, plus user_reported_context if the user has already told us anything) and its explanation of why it couldn't decide.
+
+Write 1-2 short, specific questions to ask the user whose answers would give it more to go on - e.g. where they came across this address, what they were promised, whether they were asked to send funds, connect a wallet or approve a token, or (if the address is a plain wallet rather than a contract) the address of the token or contract they are actually worried about. Ask about what is really missing here; never ask for anything already in the evidence or already answered in user_reported_context. Write them the way a person would ask them in a chat: plain, friendly, one sentence each.
+
+Respond with ONLY a single JSON object, no prose, no markdown code fences:
+{"questions": ["...", "..."]}
+"""
+
 
 class ScamChecker:
 
@@ -70,12 +92,25 @@ class ScamChecker:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-    def check(self, context: AddressContext) -> DetectionResult:
+    def check(
+        self,
+        context: AddressContext,
+        user_notes: Optional[List[str]] = None
+    ) -> Tuple[DetectionResult, List[str]]:
+        # Returns the verdict plus the clarifying questions to ask when it's insufficient_evidence.
+        payload = compact_context(context)
+        prompt = SYSTEM_PROMPT
+        if context.contract is not None and not context.contract.is_contract:
+            prompt += "\n" + WALLET_RULE + "\n"
+        if user_notes:
+            prompt += "\n" + USER_REPORTED_RULE + "\n"
+            payload = {"user_reported_context": user_notes, **payload}
+
         response = self.provider.generate(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=prompt,
             messages=[{
                 "role": "user",
-                "content": json.dumps(compact_context(context), indent=2)
+                "content": json.dumps(payload, indent=2)
             }],
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -83,31 +118,113 @@ class ScamChecker:
             frequency_penalty=0.5,
         )
         data = _parse_json(response.text)
-        data["confidence"] = _confidence_from_evidence(data.get(
-            "evidence", []))
-        return DetectionResult(**data)
+        evidence = _cap_user_reported(data.get("evidence", []))
+        data["evidence"] = evidence
+        data["confidence"] = _confidence_from_evidence(evidence)
+        if not _has_onchain_activity(context):
+            if not user_notes and data.get("label") != "insufficient_evidence":
+                data.update(label="insufficient_evidence",
+                            risk_type=None,
+                            evidence=[],
+                            explanation=EMPTY_ADDRESS_EXPLANATION,
+                            reasoning_trace=None)
+                evidence = []
+                data["confidence"] = 0.0
+            # Whatever the verdict rests on, it isn't on-chain, so it can't read as confident.
+            data["confidence"] = min(data["confidence"],
+                                     MAX_USER_ONLY_CONFIDENCE)
+        elif evidence and all(_is_user_reported(e) for e in evidence):
+            data["confidence"] = min(data["confidence"],
+                                     MAX_USER_ONLY_CONFIDENCE)
+        result = DetectionResult(**data)
+
+        questions = []
+        if result.label == "insufficient_evidence":
+            questions = self._ask_questions(payload, result)
+        return result, questions
+
+    def _ask_questions(self, payload: dict,
+                       result: DetectionResult) -> List[str]:
+        try:
+            response = self.provider.generate(
+                system_prompt=QUESTIONS_PROMPT,
+                messages=[{
+                    "role":
+                    "user",
+                    "content":
+                    json.dumps(
+                        {
+                            "evidence": payload,
+                            "why_undecided": result.explanation
+                        },
+                        indent=2)
+                }],
+                temperature=self.temperature,
+                max_tokens=MAX_QUESTION_TOKENS,
+                response_schema=ClarifyingQuestionsReply,
+            )
+            questions = _parse_json(response.text).get("questions") or []
+        except Exception:
+            return []
+        return [
+            q.strip() for q in questions if isinstance(q, str) and q.strip()
+        ][:MAX_QUESTIONS]
 
 
 MAX_TXS_SHOWN = 10
 MAX_TOKENS_SHOWN = 10
 MAX_ABI_NAMES = 30
+MAX_QUESTIONS = 2
+MAX_QUESTION_TOKENS = 200
+EMPTY_ADDRESS_EXPLANATION = (
+    "There's nothing on-chain to go on here - no contract, transactions, "
+    "tokens or pools on record - so I can't say either way whether it's a "
+    "scam. An empty address isn't a red flag by itself, but it isn't a "
+    "reassuring sign either.")
+
+USER_REPORTED_PREFIX = "user reports:"
+MAX_USER_REPORTED_WEIGHT = 0.3
+MAX_USER_ONLY_CONFIDENCE = 0.5
+
+
+def _has_onchain_activity(context: AddressContext) -> bool:
+    return bool((context.contract is not None and context.contract.is_contract)
+                or context.tx_history or context.tokens or context.liquidity)
+
+
+def _is_user_reported(item: dict) -> bool:
+    return str(item.get("description",
+                        "")).strip().lower().startswith(USER_REPORTED_PREFIX)
+
+
+def _cap_user_reported(evidence: list) -> list:
+    for item in evidence:
+        if _is_user_reported(item):
+            item["weight"] = min(item.get("weight", 0.0),
+                                 MAX_USER_REPORTED_WEIGHT)
+    return evidence
 
 
 def compact_context(context: AddressContext) -> dict:
     data = context.model_dump(by_alias=True)
+    missing = missing_fields(context)
+    for field in missing:
+        data[field] = None
+    data["unavailable_fields"] = list(missing)
 
     contract = data.get("contract")
-    if contract:
+    if contract and not contract["is_contract"]:
+        data["contract"] = {"is_contract": False}
+    elif contract:
         bytecode = contract.pop("bytecode") or ""
         contract["bytecode_size_bytes"] = max(len(bytecode) - 2, 0) // 2
         names = [
             e.get("name") for e in contract["abi"]
             if e.get("type") == "function" and e.get("name")
         ]
-        # Still empty when unverified, which the prompt treats as a red flag.
         contract["abi"] = names[:MAX_ABI_NAMES]
 
-    if "tx_history" in data:
+    if data.get("tx_history") is not None:
         txs = data["tx_history"]
         parties = {t["from"].lower()
                    for t in txs} | {t["to"].lower()
@@ -119,7 +236,7 @@ def compact_context(context: AddressContext) -> dict:
             data["tx_history_oldest_fetched"] = txs[0]["timestamp"]
         data["tx_history"] = txs[-MAX_TXS_SHOWN:]
 
-    if "tokens" in data:
+    if data.get("tokens") is not None:
         data["tokens_count"] = len(data["tokens"])
         data["tokens"] = data["tokens"][:MAX_TOKENS_SHOWN]
     return data
