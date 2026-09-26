@@ -95,7 +95,12 @@ MISSING_FIELD_WORDS = {
 # One round of clarifying questions per address, so the bot can't loop on asking.
 MAX_CLARIFICATION_ROUNDS = 1
 
-_QUESTIONS_INTRO = "A couple of things that would help me get further:"
+# Fixed wording so an insufficient_evidence reply always says so, whatever the LLM's explanation says.
+_INSUFFICIENT_INTRO = "I don't have enough evidence to give a complete verdict on this."
+_FINAL_INSUFFICIENT_INTRO = (
+    "Even with what you've told me, there still isn't enough evidence for a "
+    "firm verdict, so insufficient evidence is my final call on this one.")
+_QUESTIONS_OUTRO = "That would help me give a more accurate answer."
 
 
 def _fallback_questions(context: AddressContext) -> List[str]:
@@ -114,8 +119,8 @@ def _fallback_questions(context: AddressContext) -> List[str]:
 
 
 def _with_questions(reply: str, questions: List[str]) -> str:
-    return reply + "\n\n" + _QUESTIONS_INTRO + "\n" + "\n".join(
-        f"- {q}" for q in questions)
+    # Asked in plain sentences
+    return reply + "\n\n" + " ".join(questions) + " " + _QUESTIONS_OUTRO
 
 
 def _no_data_reply(context: AddressContext) -> str:
@@ -381,6 +386,8 @@ class ChatSession:
                     notes = notes + [user_text]
                     notes_for = key
 
+                can_ask = self._rounds_asked.get(key,
+                                                 0) < MAX_CLARIFICATION_ROUNDS
                 if len(missing) >= len(FETCHERS):
                     # Nothing on-chain came back, so there's nothing for the Scam Checker to ground a verdict in.
                     reply = _no_data_reply(context)
@@ -391,9 +398,11 @@ class ChatSession:
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
+                        intro = (_FINAL_INSUFFICIENT_INTRO if not can_ask
+                                 and notes else _INSUFFICIENT_INTRO)
+                        reply = intro + " " + reply
 
-                if questions and self._rounds_asked.get(
-                        key, 0) < MAX_CLARIFICATION_ROUNDS:
+                if questions and can_ask:
                     ask_for = key
                     reply = _with_questions(reply, questions)
                 else:
