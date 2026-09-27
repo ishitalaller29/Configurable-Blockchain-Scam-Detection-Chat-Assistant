@@ -275,10 +275,9 @@ body {
   letter-spacing: 0.3px;
 }
  
-.status-insufficient { background: #fdf3e2; color: #92650f; }
 .status-benign { background: #e7f4ea; color: #1e6b34; }
-.status-suspicious { background: #fdf3e2; color: #92650f; }
 .status-scam { background: #fbe7e7; color: #a02a2a; }
+.status-insufficient { background: #e9ecf1; color: #4a5568; }
  
 .evidence-list {
   margin: 10px 0 0;
@@ -339,10 +338,14 @@ body {
 }
  
 .interpretation-note {
-  font-size: 11px;
-  color: #97a0a8;
+  font-size: 12px;
+  color: #4a5568;
   margin-top: 10px;
-  font-style: italic;
+  padding: 8px 10px;
+  background: #f4f5f7;
+  border-radius: 6px;
+  font-style: normal;
+  line-height: 1.5;
 }
  
 .term {
