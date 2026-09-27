@@ -73,6 +73,11 @@ def build_address_context(
         except NotImplementedError:
             logger.info("%s skipped - no data source decided yet", fetcher_id)
             continue
+        except InvalidInputError:
+            raise
+        except Exception as e:
+            logger.warning("%s failed, skipping: %s", fetcher_id, e)
+            continue
 
         context[field] = value
         provenance[fetcher_id] = {"fields": [field], "fetched_at": fetched_at}
