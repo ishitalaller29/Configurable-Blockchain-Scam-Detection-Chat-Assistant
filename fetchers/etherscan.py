@@ -32,9 +32,14 @@ class InvalidInputError(EtherscanError):
     pass
 
 
+class UnsupportedChainError(EtherscanError):
+    # The user asked about a chain we can't look up, so this is answered with a question, not reported as an outage.
+    pass
+
+
 def check_chain(chain: str) -> None:
     if chain.lower() != SUPPORTED_CHAIN:
-        raise EtherscanError(
+        raise UnsupportedChainError(
             f"chain '{chain}' is not supported - only {SUPPORTED_CHAIN}")
 
 

@@ -27,6 +27,21 @@ ctx = build_address_context("ethereum", "0x...", ["contract"])      # address_in
 Each fetcher can also be called on its own (`fetch_contract_info(chain, address)` etc.),
 but only `build_address_context` caches and records provenance.
 
+## When a fetcher fails
+
+`build_address_context` never lets one fetcher's failure stop the others. Each
+`fetcher_provenance` entry has a `status`:
+
+| status | meaning | field value in the context |
+|---|---|---|
+| `ok` | fetched (has `fetched_at`) | real data |
+| `failed` | the fetcher errored — rate limit, network, missing key... (has a short `error`) | default (`[]` / `None`) — means **unknown**, not "none" |
+| `unavailable` | no data source yet (the liquidity stub) | default — **unknown** |
+
+Use `missing_fields(context)` to get `{field: status}` for everything that isn't `ok`.
+Failures are never cached, so the next message retries them. Only a malformed
+address or an unsupported chain still raises, since there's nothing to fetch.
+
 ## How the Etherscan traps are handled
 
 - **API key**: `ETHERSCAN_API_KEY` from `.env`; missing key raises `ConfigError` before any request.

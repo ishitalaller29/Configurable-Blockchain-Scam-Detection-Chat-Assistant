@@ -93,6 +93,14 @@ document.addEventListener('DOMContentLoaded', () => {
     detector: 'Configured detector',
   };
 
+  // Mirrors conversation.MISSING_FIELD_WORDS.
+  const MISSING_FIELD_WORDS = {
+    contract: 'contract details',
+    tx_history: 'transaction history',
+    tokens: 'token balances',
+    liquidity: 'liquidity pool data',
+  };
+
   function evidenceList(evidence) {
     const ul = document.createElement('ul');
     ul.className = 'evidence-list';
@@ -162,6 +170,15 @@ document.addEventListener('DOMContentLoaded', () => {
       rows.push(['Source', SOURCE_WORDS[data.source] || data.source]);
     }
     if (rows.length) div.appendChild(detailBlock(rows));
+
+    // Shown on every reply that relied on fetched data, so a check that couldn't run is never mistaken for a clean one.
+    if (Array.isArray(data.missing_fields) && data.missing_fields.length) {
+      const note = document.createElement('p');
+      note.className = 'interpretation-note';
+      note.textContent = 'Not checked (data unavailable): ' +
+        data.missing_fields.map(f => MISSING_FIELD_WORDS[f] || f).join(', ');
+      div.appendChild(note);
+    }
 
     thread.scrollTop = thread.scrollHeight;
   }
