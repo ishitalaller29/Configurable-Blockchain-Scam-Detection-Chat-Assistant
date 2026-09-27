@@ -93,6 +93,8 @@ def build_address_context(
                 "error": "no data source hooked up yet",
             }
             continue
+        except InvalidInputError:
+            raise
         except Exception as e:
             logger.warning("%s failed: %s", fetcher_id, _safe_error(e))
             provenance[fetcher_id] = {
