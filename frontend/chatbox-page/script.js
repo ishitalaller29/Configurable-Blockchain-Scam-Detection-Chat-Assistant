@@ -84,7 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const STATUS_TAGS = {
     scam: { text: 'Scam', className: 'status-scam' },
     not_scam: { text: 'Not scam', className: 'status-benign' },
-    insufficient_evidence: { text: 'Suspicious', className: 'status-insufficient' },
+    insufficient_evidence: { text: 'Insufficient evidence', className: 'status-insufficient' },
   };
 
   // Mirrors conversation.SOURCE_WORDS so both front ends name the source identically. Unknown values fall through and render as-is.
@@ -152,8 +152,15 @@ document.addEventListener('DOMContentLoaded', () => {
       div.insertBefore(span, textEl);
     }
 
-    if (Array.isArray(data.evidence) && data.evidence.length) {
+    const hasEvidence = Array.isArray(data.evidence) && data.evidence.length > 0;
+
+    if (hasEvidence) {
       div.appendChild(evidenceList(data.evidence));
+    } else if (data.label === 'insufficient_evidence') {
+      const note = document.createElement('p');
+      note.className = 'interpretation-note';
+      note.textContent = 'Not enough on-chain data was found for this address to reach a scam or not-scam verdict.';
+      div.appendChild(note);
     } else if (tag) {
       const note = document.createElement('p');
       note.className = 'interpretation-note';
@@ -163,7 +170,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const rows = [];
     if (typeof data.confidence === 'number') {
-      rows.push(['Confidence', Math.round(data.confidence * 100) + '%']);
+      const isZeroConfidenceNoEvidence = data.confidence === 0 && !hasEvidence;
+      rows.push([
+        'Confidence',
+        isZeroConfidenceNoEvidence ? 'Not available' : Math.round(data.confidence * 100) + '%',
+      ]);
     }
     if (data.risk_type) rows.push(['Risk type', data.risk_type]);
     if (data.source) {
