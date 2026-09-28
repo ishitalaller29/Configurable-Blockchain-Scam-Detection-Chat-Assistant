@@ -21,6 +21,12 @@ class BusinessAnalyserOutput(BaseModel):
     resolution_plan: List[str] = Field(default_factory=list)
     direct_response: Optional[str] = None
     requested_fields: List[str] = Field(default_factory=list)
+    
+    expertise_tier: Optional[Literal["beginner", "intermediate",
+                                     "professional"]] = None
+    use_case: Optional[Literal["investment", "investigative_legal",
+                               "compliance_risk"]] = None
+    needs_clarification: bool = False
 
 
 class Evidence(BaseModel):
