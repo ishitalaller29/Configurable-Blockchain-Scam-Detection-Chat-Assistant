@@ -191,6 +191,27 @@ document.addEventListener('DOMContentLoaded', () => {
       div.appendChild(note);
     }
 
+    if (Array.isArray(data.quick_replies) && data.quick_replies.length > 0) {
+      const quickReplies = document.createElement('div');
+      quickReplies.className = 'quick-replies';
+
+      data.quick_replies.forEach(option => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'quick-reply-chip';
+        button.textContent = option;
+
+        button.addEventListener('click', () => {
+          quickReplies.remove();
+          sendMessage(option);
+        });
+
+        quickReplies.appendChild(button);
+      });
+
+      div.appendChild(quickReplies);
+    }
+
     thread.scrollTop = thread.scrollHeight;
   }
 
@@ -205,8 +226,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---------- Send ----------
   let sending = false;
 
-  async function sendMessage() {
-    const text = chatInput.value.trim();
+  async function sendMessage(messageOverride = null) {
+    const text = (messageOverride ?? chatInput.value).trim();
     if (!text || sending) return;
 
     if (promptHint) promptHint.style.display = 'none';

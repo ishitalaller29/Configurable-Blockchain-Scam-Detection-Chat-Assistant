@@ -68,6 +68,8 @@ class ChatResponse(BaseModel):
     missing_fields: List[str] = []
     # Asked because the evidence was insufficient, already included at the end of reply.
     clarifying_questions: List[str] = []
+    # Optional quick-reply buttons displayed beneath the assistant response.
+    quick_replies: List[str] = []
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -91,6 +93,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         source=turn.detection_source,
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
+        quick_replies=turn.quick_replies,
     )
 
 
