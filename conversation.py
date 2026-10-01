@@ -4,14 +4,19 @@ from typing import Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
 from agents.scam_checker import ScamChecker
+from config_loader import get_active_detector
+from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
+                                run_detector)
 from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
-from fetchers.etherscan import InvalidInputError, UnsupportedChainError
-from fetchers.fetcher_output import get_address_context, is_supported
+from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
+                                UnsupportedChainError)
+from fetchers.fetcher_output import (get_address_context, is_supported,
+                                     resolve_address)
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
 from schema import (AddressContext, BusinessAnalyserOutput, DetectionResult,
-                    RawInput)
+                    DetectorConfig, RawInput)
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +39,40 @@ SOURCE_WORDS = {
 }
 
 
+def describe_source(source: str, detector_name: Optional[str] = None) -> str:
+    words = SOURCE_WORDS.get(source, source)
+    if source == SOURCE_DETECTOR and detector_name:
+        return f"{words} ({detector_name})"
+    return words
+
+
 def summarize_detection(result: DetectionResult) -> str:
     return result.explanation
+
+
+_DETECTOR_VERDICT_WORDS = {
+    "scam": "flags this as a scam",
+    "not_scam": "doesn't flag this as a scam",
+    "insufficient_evidence": "couldn't reach a scam or not-scam verdict on this one",
+}
+_MAX_FINDINGS_NAMED = 3
+
+
+def _template_explanation(result: DetectionResult, detector_name: str) -> str:
+    reply = (f"{detector_name} {_DETECTOR_VERDICT_WORDS[result.label]} "
+             f"(confidence {round(result.confidence * 100)}%).")
+    if not result.evidence:
+        return reply + " It didn't give any supporting evidence for that."
+    strongest = sorted(result.evidence, key=lambda e: e.weight, reverse=True)
+    findings = "; ".join(
+        e.description.rstrip(". ") for e in strongest[:_MAX_FINDINGS_NAMED])
+    return reply + f" Its strongest findings: {findings}."
+
+
+def explain_detector_result(result: DetectionResult, detector_name: str,
+                            context: Optional[AddressContext]) -> DetectionResult:
+    return result.model_copy(
+        update={"explanation": _template_explanation(result, detector_name)})
 
 
 _CHAIN_NAMES = {
@@ -128,6 +165,15 @@ def _no_data_reply(context: AddressContext) -> str:
             f"checks on {context.address} just now, so I've got nothing "
             "on-chain to judge it by, and I'd rather not guess. Try asking "
             "again in a minute.")
+
+
+def _detector_failed_reply(outcome: DetectorOutcome) -> str:
+    reply = f"No verdict this time - {outcome.error}"
+    if outcome.error_kind in (ERROR_CONFIG, ERROR_REJECTED):
+        return reply + (" That's a problem with how the detector is set up, "
+                        "not a sign either way about this address.")
+    return reply + (" So I can't say either way yet - want to try again in "
+                    "a minute?")
 
 
 def _chain_name(chain: str) -> str:
@@ -287,6 +333,7 @@ class TurnResult:
     ba_output: BusinessAnalyserOutput
     detection_result: Optional[DetectionResult] = None
     detection_source: Optional[str] = None
+    detector_name: Optional[str] = None
     # Context fields that couldn't be checked this turn
     missing_fields: List[str] = field(default_factory=list)
     # Questions asked this turn because the evidence was insufficient
@@ -301,7 +348,18 @@ class ChatSession:
                  max_tokens: int = 800,
                  max_history_messages: int = 500,
                  send_window_messages: int = 20):
-        self.ba = BusinessAnalyser(provider, temperature, max_tokens)
+        self.detector: Optional[DetectorConfig] = None
+        detector_id = None
+        active = get_active_detector()
+        if active is not None:
+            detector_id, self.detector = active
+        self.ba = BusinessAnalyser(
+            provider,
+            temperature,
+            max_tokens,
+            selected_detector=detector_id,
+            detector_required_input=(self.detector.required_input_type
+                                     if self.detector else None))
         self.sc = ScamChecker(provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
@@ -346,6 +404,48 @@ class ChatSession:
                            type(e).__name__)
             return None, _lookup_error_reply(e, chain)
 
+    def _detector_check(
+        self, ba_output: BusinessAnalyserOutput
+    ) -> Tuple[str, Optional[DetectionResult], Dict[str, str]]:
+        config = self.detector
+        chain = ba_output.chain or "ethereum"
+        context: Optional[AddressContext] = None
+        missing: Dict[str, str] = {}
+
+        if ba_output.required_input_type == "address_with_context":
+            context, reply = self._fetch_context(ba_output)
+            if context is None:
+                return reply, None, missing
+            missing = missing_fields(context)
+            address = context.address
+        else:
+            try:
+                address = resolve_address(ba_output.raw_input, chain)
+                if not ADDRESS_RE.match(address):
+                    raise InvalidInputError(
+                        f"'{address}' is not a valid address (0x + 40 hex "
+                        "characters)")
+            except Exception as e:
+                logger.warning("lookup for %s failed: %s",
+                               ba_output.raw_input, type(e).__name__)
+                return _lookup_error_reply(e, chain), None, missing
+
+        outcome = run_detector(config, address, chain, context)
+        if not outcome.ok:
+            return _detector_failed_reply(outcome), None, missing
+
+        result = DetectionResult(**outcome.core.model_dump(),
+                                 explanation=outcome.explanation or "")
+        if not config.is_llm_based:
+            result = explain_detector_result(result, outcome.detector_name,
+                                             context)
+        reply = summarize_detection(result)
+        if result.label == "insufficient_evidence":
+            reply = _INSUFFICIENT_INTRO + " " + reply
+        if outcome.notes:
+            reply += " " + " ".join(outcome.notes)
+        return reply, result, missing
+
     def _run_turn(self) -> TurnResult:
         user_text = self.history[-1]["content"]
         # Only the turn right after questions were asked can be the answer to them.
@@ -354,6 +454,7 @@ class ChatSession:
 
         detection_result = None
         detection_source = None
+        detector_name = None
         missing: Dict[str, str] = {}
         questions: List[str] = []
         ask_for: Optional[Tuple[str, str]] = None
@@ -375,6 +476,11 @@ class ChatSession:
             reply = ba_output.direct_response or "I can't help with that yet."
         elif not is_supported(ba_output.raw_input):
             reply = _unresolved_input_reply(ba_output.raw_input)
+        elif ba_output.detector_configured:
+            reply, detection_result, missing = self._detector_check(ba_output)
+            if detection_result is not None:
+                detection_source = SOURCE_DETECTOR
+                detector_name = self.detector.name
         else:
             context, reply = self._fetch_context(ba_output)
             if context is not None:
@@ -434,5 +540,6 @@ class ChatSession:
                           ba_output=ba_output,
                           detection_result=detection_result,
                           detection_source=detection_source,
+                          detector_name=detector_name,
                           missing_fields=list(missing),
                           clarifying_questions=questions)

@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from llm_providers.base import LLMProvider
 from schema import BusinessAnalyserOutput
@@ -100,10 +100,14 @@ class BusinessAnalyser:
     def __init__(self,
                  provider: LLMProvider,
                  temperature: float = 0.3,
-                 max_tokens: int = 800):
+                 max_tokens: int = 800,
+                 selected_detector: Optional[str] = None,
+                 detector_required_input: Optional[str] = None):
         self.provider = provider
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.selected_detector = selected_detector
+        self.detector_required_input = detector_required_input
 
     def analyse(self, messages: List[Dict[str,
                                           str]]) -> BusinessAnalyserOutput:
@@ -116,7 +120,12 @@ class BusinessAnalyser:
             frequency_penalty=0.3,
         )
         data = _parse_json(response.text)
-        return BusinessAnalyserOutput(**data)
+        output = BusinessAnalyserOutput(**data)
+        output.selected_detector = self.selected_detector
+        output.detector_configured = self.selected_detector is not None
+        output.required_input_type = (self.detector_required_input
+                                      or "address_with_context")
+        return output
 
 
 def _parse_json(text: str) -> dict:

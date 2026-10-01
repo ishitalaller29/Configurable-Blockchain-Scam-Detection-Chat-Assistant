@@ -3,7 +3,7 @@ import sys
 
 from config import build_default_provider, LLM_CONFIG
 from conversation import (ChatSession, LABEL_WORDS, MISSING_FIELD_WORDS,
-                          SOURCE_WORDS)
+                          describe_source)
 
 _RESET = "\033[0m"
 
@@ -54,8 +54,8 @@ def print_turn(turn):
         rows.append(("Risk type", detection.risk_type))
     if turn.detection_source:
         rows.append(("Source",
-                     SOURCE_WORDS.get(turn.detection_source,
-                                      turn.detection_source)))
+                     describe_source(turn.detection_source,
+                                     turn.detector_name)))
 
     print("\n  Detection details:")
     for name, value in rows:
