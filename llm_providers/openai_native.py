@@ -1,15 +1,15 @@
-from typing import List, Dict, Optional, Type
-from openai import OpenAI, APIError
+from typing import Dict, List, Optional, Type
+
+from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
 from llm_providers.base import LLMProvider, LLMResponse
 
+class OpenAINativeProvider(LLMProvider):
 
-class OpenAICompatibleProvider(LLMProvider):
-
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str):
         self.model = model
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.client = OpenAI(api_key=api_key)
 
     def generate(
         self,
@@ -35,31 +35,22 @@ class OpenAICompatibleProvider(LLMProvider):
                 },
             }
 
-        try:
-            response = self._create(full_messages, temperature, max_tokens,
-                                    response_format, frequency_penalty)
-        except APIError:
-            if response_format is None:
-                raise
-            response = self._create(full_messages, temperature, max_tokens,
-                                    None, 0.0)
-
-        text = response.choices[0].message.content or ""
-        return LLMResponse(text=text, raw_response=response)
-
-    def _create(self,
-                full_messages,
-                temperature,
-                max_tokens,
-                response_format,
-                frequency_penalty=0.0):
         kwargs = dict(
             model=self.model,
             messages=full_messages,
+            max_completion_tokens=max_tokens,
             temperature=temperature,
-            max_tokens=max_tokens,
             frequency_penalty=frequency_penalty,
         )
         if response_format is not None:
             kwargs["response_format"] = response_format
-        return self.client.chat.completions.create(**kwargs)
+
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except BadRequestError:
+            kwargs.pop("temperature", None)
+            kwargs.pop("frequency_penalty", None)
+            response = self.client.chat.completions.create(**kwargs)
+
+        text = response.choices[0].message.content or ""
+        return LLMResponse(text=text, raw_response=response)
