@@ -64,6 +64,7 @@ class ChatResponse(BaseModel):
     risk_type: Optional[str] = None
     evidence: List[Evidence] = []
     source: Optional[str] = None
+    detector_name: Optional[str] = None
     # Context fields that couldn't be checked this turn.
     missing_fields: List[str] = []
     # Asked because the evidence was insufficient, already included at the end of reply.
@@ -89,6 +90,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             for e in det.evidence
         ] if det else [],
         source=turn.detection_source,
+        detector_name=turn.detector_name,
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
     )

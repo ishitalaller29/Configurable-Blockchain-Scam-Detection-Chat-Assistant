@@ -178,7 +178,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (data.risk_type) rows.push(['Risk type', data.risk_type]);
     if (data.source) {
-      rows.push(['Source', SOURCE_WORDS[data.source] || data.source]);
+      let source = SOURCE_WORDS[data.source] || data.source;
+      if (data.source === 'detector' && data.detector_name) {
+        source += ' (' + data.detector_name + ')';
+      }
+      rows.push(['Source', source]);
     }
     if (rows.length) div.appendChild(detailBlock(rows));
 

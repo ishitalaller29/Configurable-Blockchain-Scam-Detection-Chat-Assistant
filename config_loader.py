@@ -2,13 +2,17 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
+from detector.validator import DetectorConfigError, validate_detector_config
+from schema import DetectorConfig
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "app_config.json"
+_STORE_ONLY_KEYS = ("id", "status")
 
 # Real environment variables win over .env, so Docker/CI can override it.
 load_dotenv(PROJECT_ROOT / ".env")
@@ -92,6 +96,32 @@ def get_cache_settings(path: Path = CONFIG_PATH) -> CacheSettings:
         return CacheSettings(**block)
     except ValidationError as e:
         raise ConfigError(f"Cache settings are malformed: {e}") from e
+
+
+def get_active_detector(
+        path: Path = CONFIG_PATH) -> Optional[Tuple[str, DetectorConfig]]:
+    config = load_config(path)
+    detector_id = os.environ.get("ACTIVE_DETECTOR",
+                                 config.get("active_detector") or "")
+    if not detector_id or detector_id.lower() in ("none", "null"):
+        return None
+
+    entries = config.get("detectors", [])
+    entry = next((e for e in entries if e.get("id") == detector_id), None)
+    if entry is None:
+        known = ", ".join(e.get("id", "?") for e in entries) or "none"
+        raise ConfigError(
+            f"Active detector '{detector_id}' is not in config (known: {known})")
+
+    mapping_file = {
+        k: v
+        for k, v in entry.items() if k not in _STORE_ONLY_KEYS
+    }
+    try:
+        return detector_id, validate_detector_config(mapping_file)
+    except DetectorConfigError as e:
+        raise ConfigError(
+            f"Detector '{detector_id}' config is invalid: {e}") from e
 
 
 def resolve_secret(value: Optional[str]) -> str:
