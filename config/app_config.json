@@ -63,7 +63,7 @@
       "method": "GET",
       "required_input_type": "address",
       "is_llm_based": false,
-      "timeout_seconds": null,
+      "timeout_seconds": 10,
       "//timeout": "Connector's job, not the mapping layer's. Timeouts and 4xx/5xx fail the same way, without running any mapping.",
       "//auth": "Free tier is anonymous and needs no key, which is how the evaluation ran. REKTRADAR_API_KEY is not in .env yet - a key is expected in Week 2, so the block is configured ready for it.",
       "auth": { "type": "header", "header_name": "X-API-Key", "value_template": "{api_key}", "api_key": "env:REKTRADAR_API_KEY" },
@@ -74,6 +74,10 @@
         "label": {
           "//": "Score is numeric, not a word, so ranges derive the enum; first match wins. Fallback covers 40-69 and flags containing insufficient_data.",
           "path": "$.score",
+          "overrides": [
+            { "path": "$.flags", "contains": ["insufficient_data"], "value": "insufficient_evidence" },
+            { "path": "$.analyzed", "equals": false, "value": "insufficient_evidence" }
+          ],
           "ranges": [
             { "gte": 70, "value": "scam" },
             { "lt": 40, "value": "not_scam" }
@@ -96,7 +100,10 @@
             "lp_not_locked": { "description": "Liquidity is neither burned nor locked, so it can be pulled.", "weight": 0.6 },
             "unrestricted_mint": { "description": "Supply can be minted with no access control.", "weight": 0.7 },
             "no_renounce_ownership": { "description": "The deployer still controls the contract.", "weight": 0.4 },
-            "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 }
+            "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 },
+            "insufficient_data": { "description": "RektRadar couldn't gather enough on-chain data to judge this token, so a low score means unknown, not safe.", "weight": 0.3 },
+            "whitelisted": { "description": "RektRadar lists this as a known, established token.", "weight": 0.6 },
+            "no_graph_data": { "description": "RektRadar has no transaction-graph data for this address, so its score rests on less information.", "weight": 0.2 }
           }
         },
         "//risk_type": "Unmapped on purpose - RektRadar has no category field, so it stays null rather than guessed. Documented limitation."
@@ -109,12 +116,58 @@
       "id": "template_mock",
       "name": "MyTemplateDetector",
       "mode": "template",
-      "status": "stub",
+      "status": "live",
       "endpoint": "http://localhost:9000/detect",
       "method": "POST",
       "required_input_type": "address_with_context",
       "is_llm_based": false,
-      "timeout_seconds": null
+      "timeout_seconds": 10
+    },
+    {
+      "id": "rektradar_mock",
+      "name": "RektRadar (local mock)",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "http://localhost:9000/v1/token/{{ address }}",
+      "method": "GET",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": 10,
+      "request": {
+        "body_template": {}
+      },
+      "response_mapping": {
+        "label": {
+          "path": "$.score",
+          "overrides": [
+            { "path": "$.flags", "contains": ["insufficient_data"], "value": "insufficient_evidence" },
+            { "path": "$.analyzed", "equals": false, "value": "insufficient_evidence" }
+          ],
+          "ranges": [
+            { "gte": 70, "value": "scam" },
+            { "lt": 40, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "path": "$.score",
+          "scale": 100
+        },
+        "evidence": {
+          "mode": "code_list",
+          "list_path": "$.flags",
+          "default_weight": 0.3,
+          "codes": {
+            "honeypot": { "description": "Token can be bought but not sold; funds get trapped.", "weight": 0.95 },
+            "sell_failed": { "description": "Buys succeed but sells revert — classic honeypot.", "weight": 0.9 },
+            "lp_not_locked": { "description": "Liquidity is neither burned nor locked, so it can be pulled.", "weight": 0.6 },
+            "unrestricted_mint": { "description": "Supply can be minted with no access control.", "weight": 0.7 },
+            "no_renounce_ownership": { "description": "The deployer still controls the contract.", "weight": 0.4 },
+            "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 },
+            "insufficient_data": { "description": "RektRadar couldn't gather enough on-chain data to judge this token, so a low score means unknown, not safe.", "weight": 0.3 }
+          }
+        }
+      }
     }
   ],
   "data_sources": [
