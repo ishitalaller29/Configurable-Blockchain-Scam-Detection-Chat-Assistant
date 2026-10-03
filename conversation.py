@@ -309,9 +309,14 @@ class ChatSession:
                  temperature: float = 0.3,
                  max_tokens: int = 800,
                  max_history_messages: int = 500,
-                 send_window_messages: int = 20):
-        self.ba = BusinessAnalyser(provider, temperature, max_tokens)
-        self.sc = ScamChecker(provider, temperature, max_tokens)
+                 send_window_messages: int = 20,
+                 ba_provider: Optional[LLMProvider] = None,
+                 sc_provider: Optional[LLMProvider] = None):
+        # ba_provider/sc_provider let each agent run on its own configured
+        # LLM backend (FR-14). Both default to `provider` so every existing
+        # caller that passes just one provider keeps working unchanged.
+        self.ba = BusinessAnalyser(ba_provider or provider, temperature, max_tokens)
+        self.sc = ScamChecker(sc_provider or provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
         self.max_history_messages = max_history_messages

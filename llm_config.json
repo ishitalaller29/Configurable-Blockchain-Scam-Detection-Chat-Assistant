@@ -1,0 +1,20 @@
+{
+  "business_analyser": {
+    "provider": "gemini_native",
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "not-needed",
+    "model": "llama3.1"
+  },
+  "scam_checker": {
+    "provider": "anthropic_native",
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "not-needed",
+    "model": "llama3.1"
+  },
+  "forensic_investigator": {
+    "provider": "openai_compatible",
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "not-needed",
+    "model": "llama3.1"
+  }
+}

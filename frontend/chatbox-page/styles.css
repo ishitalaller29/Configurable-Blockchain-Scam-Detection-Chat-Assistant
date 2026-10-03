@@ -498,3 +498,39 @@ body {
   color: #9aa2a9;
   margin-top: 14px;
 }
+
+.llm-config-section {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #e7e9ec;
+}
+
+.llm-agent-row {
+  margin-bottom: 14px;
+}
+
+.llm-agent-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #33404f;
+  margin: 0 0 6px;
+}
+
+.llm-agent-row select,
+.llm-agent-row input {
+  width: 100%;
+  font-size: 13px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid #cfd5db;
+  font-family: inherit;
+  color: #14213d;
+  margin-bottom: 6px;
+  background: #fbfbfc;
+}
+
+.llm-provider-note {
+  font-size: 11px;
+  color: #a02a2a;
+  margin: -2px 0 6px;
+}

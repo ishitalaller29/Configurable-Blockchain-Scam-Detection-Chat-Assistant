@@ -11,6 +11,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
   const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
+  const llmConfigRows = document.getElementById('llmConfigRows');
+  const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
+  const llmConfigStatus = document.getElementById('llmConfigStatus');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -58,6 +61,139 @@ document.addEventListener('DOMContentLoaded', () => {
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+  });
+
+  // ---------- Admin password gate ----------
+  // Hardcoded shared passphrase per the client's own suggestion (confirmed
+  // in the technical advisor meeting as the simplest acceptable approach -
+  // real auth/accounts are explicitly out of scope for this project).
+  const ADMIN_PASSPHRASE = 'admin';
+
+  adminToggle.addEventListener('change', () => {
+    if (adminToggle.checked) {
+      const attempt = window.prompt('Enter the admin passphrase');
+      if (attempt !== ADMIN_PASSPHRASE) {
+        adminToggle.checked = false;
+        if (attempt !== null) {
+          window.alert('Incorrect passphrase.');
+        }
+        return;
+      }
+      sidebar.style.display = 'block';
+      loadLlmConfig();
+    } else {
+      sidebar.style.display = 'none';
+    }
+  });
+
+  // ---------- LLM Backend config (FR-14) ----------
+  const AGENT_LABELS = {
+    business_analyser: 'Business Analyser',
+    scam_checker: 'Scam Checker',
+    forensic_investigator: 'Forensic Investigator',
+  };
+
+  const LLM_CONFIG_URL = API_BASE + '/admin/llm-config';
+  let llmConfigState = null;
+
+  function renderLlmConfig(data) {
+    llmConfigState = data;
+    llmConfigRows.innerHTML = '';
+
+    Object.keys(AGENT_LABELS).forEach(agentKey => {
+      const agentConfig = data.config[agentKey];
+      if (!agentConfig) return;
+
+      const row = document.createElement('div');
+      row.className = 'llm-agent-row';
+      row.dataset.agent = agentKey;
+
+      const label = document.createElement('p');
+      label.className = 'llm-agent-label';
+      label.textContent = AGENT_LABELS[agentKey];
+      row.appendChild(label);
+
+      const select = document.createElement('select');
+      select.className = 'llm-provider-select';
+      data.supported_providers.forEach(provider => {
+        const opt = document.createElement('option');
+        opt.value = provider;
+        opt.textContent = provider;
+        if (provider === agentConfig.provider) opt.selected = true;
+        select.appendChild(opt);
+      });
+      row.appendChild(select);
+
+      const modelInput = document.createElement('input');
+      modelInput.type = 'text';
+      modelInput.className = 'llm-model-input';
+      modelInput.placeholder = 'Model name';
+      modelInput.value = agentConfig.model || '';
+      row.appendChild(modelInput);
+
+      const note = document.createElement('p');
+      note.className = 'llm-provider-note';
+      const isFunctional = data.functional_providers.includes(agentConfig.provider);
+      note.textContent = isFunctional
+        ? ''
+        : 'Selected, but not yet functional - wired up in Sprint 3.';
+      note.style.display = isFunctional ? 'none' : 'block';
+      row.appendChild(note);
+
+      select.addEventListener('change', () => {
+        const functional = data.functional_providers.includes(select.value);
+        note.textContent = functional
+          ? ''
+          : 'Selected, but not yet functional - wired up in Sprint 3.';
+        note.style.display = functional ? 'none' : 'block';
+      });
+
+      llmConfigRows.appendChild(row);
+    });
+  }
+
+  async function loadLlmConfig() {
+    try {
+      const res = await fetch(LLM_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = '';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Could not load LLM config from the server.';
+    }
+  }
+
+  saveLlmConfigBtn.addEventListener('click', async () => {
+    if (!llmConfigState) return;
+    const config = {};
+    llmConfigRows.querySelectorAll('.llm-agent-row').forEach(row => {
+      const agentKey = row.dataset.agent;
+      const provider = row.querySelector('.llm-provider-select').value;
+      const model = row.querySelector('.llm-model-input').value.trim();
+      const existing = llmConfigState.config[agentKey] || {};
+      config[agentKey] = {
+        provider,
+        model,
+        base_url: existing.base_url || null,
+        api_key: existing.api_key || null,
+      };
+    });
+
+    llmConfigStatus.textContent = 'Saving…';
+    try {
+      const res = await fetch(LLM_CONFIG_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config }),
+      });
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = 'Saved.';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Failed to save LLM config.';
+    }
   });
 
   function appendUserMsg(text) {
