@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
   const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
+  const sourceFileInput = document.getElementById('sourceFileInput');
+  const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -46,18 +48,41 @@ document.addEventListener('DOMContentLoaded', () => {
     item.classList.add('active');
   });
 
+  // "Add source" now ingests an uploaded detector/config file (built from the API
+  // Wrapper Template) rather than just a typed-in name. Clicking the button opens
+  // the hidden file input; the chosen file's name is shown as the new source item.
+  // No actual upload to a backend endpoint yet - wiring that up, and validating the
+  // file against the wrapper template's schema, is backend work for a later sprint.
   addSourceBtn.addEventListener('click', () => {
-    const name = (window.prompt('Name of the source to add') || '').trim();
-    if (!name) return;
+    sourceFileInput.click();
+  });
+
+  sourceFileInput.addEventListener('change', () => {
+    const file = sourceFileInput.files && sourceFileInput.files[0];
+    if (!file) return;
+
     const item = document.createElement('div');
     item.className = 'source-item';
     item.tabIndex = 0;
-    item.dataset.source = name;
-    item.textContent = name;
+    item.dataset.source = file.name;
+    item.textContent = file.name;
     const dot = document.createElement('span');
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+
+    // Reset so selecting the same file again still fires 'change'.
+    sourceFileInput.value = '';
+  });
+
+  // Stub only: real deployment of the API Wrapper Template repo as a Docker image
+  // happens in Sprint 3. This just marks where that download call will go, so the
+  // button is wired up and visible now without the actual asset existing yet.
+  downloadTemplateBtn.addEventListener('click', () => {
+    // TODO (Sprint 3): replace with a real download of the API Wrapper Template's
+    // Docker image once that deployment pipeline exists. For now this is a no-op
+    // placeholder so the button renders and is clickable without erroring.
+    console.log('Download API wrapper template - not yet implemented (Sprint 3).');
   });
 
   function appendUserMsg(text) {

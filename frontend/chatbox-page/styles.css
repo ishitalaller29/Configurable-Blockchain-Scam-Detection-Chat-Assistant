@@ -183,6 +183,24 @@ body {
   width: 100%;
   font-family: inherit;
 }
+
+.download-template {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  color: #1f3a5f;
+  border: 1px solid #cfd5db;
+  text-align: center;
+  cursor: pointer;
+  background: #fbfbfc;
+  width: 100%;
+  font-family: inherit;
+  margin-top: 8px;
+}
+
+.download-template:hover {
+  background: #eef1f4;
+}
  
 .main-area {
   flex: 1;
