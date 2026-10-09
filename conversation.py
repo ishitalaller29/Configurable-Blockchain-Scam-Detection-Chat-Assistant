@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
 from agents.scam_checker import ScamChecker
-from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
+from fetchers.context_builder import (FETCHERS, STATUS_FAILED, citations,
+                                      missing_fields)
 from fetchers.etherscan import InvalidInputError, UnsupportedChainError
 from fetchers.fetcher_output import get_address_context, is_supported
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
@@ -300,6 +301,8 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
+    # The data sources a verdict drew on ({"name", "url"}), for the citation pills.
+    citations: List[Dict[str, Optional[str]]] = field(default_factory=list)
 
 
 class ChatSession:
@@ -401,6 +404,7 @@ class ChatSession:
 
         detection_result = None
         detection_source = None
+        cited: List[Dict[str, Optional[str]]] = []
         missing: Dict[str, str] = {}
         questions: List[str] = []
         ask_for: Optional[Tuple[str, str]] = None
@@ -442,6 +446,8 @@ class ChatSession:
                 else:
                     detection_result, questions = self.sc.check(context, notes)
                     detection_source = SOURCE_SCAM_CHECKER
+                    # Only a reply that carries a verdict cites its sources.
+                    cited = citations(context)
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
@@ -482,4 +488,5 @@ class ChatSession:
                           detection_result=detection_result,
                           detection_source=detection_source,
                           missing_fields=list(missing),
-                          clarifying_questions=questions)
+                          clarifying_questions=questions,
+                          citations=cited)
