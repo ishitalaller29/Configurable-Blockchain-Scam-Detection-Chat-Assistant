@@ -52,7 +52,12 @@ def _fail(config: DetectorConfig,
 def _auth_headers(config: DetectorConfig) -> Dict[str, str]:
     if config.auth is None:
         return {}
-    secret = resolve_secret(config.auth.api_key)
+    try:
+        secret = resolve_secret(config.auth.api_key)
+    except ConfigError:
+        if config.auth.optional:
+            return {}
+        raise
     return {
         config.auth.header_name:
         config.auth.value_template.replace("{api_key}", secret)

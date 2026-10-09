@@ -125,6 +125,7 @@ class AuthConfig(BaseModel):
     header_name: str
     value_template: str = "{api_key}"
     api_key: str
+    optional: bool = False
 
 
 class RequestConfig(BaseModel):
@@ -155,13 +156,25 @@ class LabelOverride(BaseModel):
     path: str
     contains: Optional[List[str]] = None
     equals: Optional[Any] = None
+    min_items: Optional[int] = Field(default=None, ge=0)
+    max_items: Optional[int] = Field(default=None, ge=0)
     value: Label
 
     @model_validator(mode="after")
     def _one_condition(self):
-        if (self.contains is None) == (self.equals is None):
+        counts_items = (self.min_items is not None
+                        or self.max_items is not None)
+        conditions = [
+            self.contains is not None, self.equals is not None, counts_items
+        ]
+        if sum(conditions) != 1:
             raise ValueError(
-                "a label override needs exactly one of 'contains' or 'equals'")
+                "a label override needs exactly one condition: 'contains', "
+                "'equals', or 'min_items'/'max_items'")
+        if (self.min_items is not None and self.max_items is not None
+                and self.min_items > self.max_items):
+            raise ValueError(
+                "a label override's 'min_items' can't be above 'max_items'")
         if self.contains is not None and not self.contains:
             raise ValueError("a label override's 'contains' can't be empty")
         if not isinstance(self.equals, (type(None), str, int, float, bool)):
@@ -199,13 +212,25 @@ class ConfidenceMapping(BaseModel):
     path: str
     scale: float = Field(default=1.0, gt=0)
     default: float = Field(default=0.0, ge=0.0, le=1.0)
+    measures: Literal["label", "risk", "safety"] = "label"
 
 
 class EvidenceItemMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str
+    title: Optional[str] = None
     weight: Optional[str] = None
+    weight_map: Dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("weight_map")
+    @classmethod
+    def _map_weights_in_range(cls, weight_map: Dict[str, float]):
+        for word, weight in weight_map.items():
+            if not 0.0 <= weight <= 1.0:
+                raise ValueError(
+                    f"weight_map[{word!r}] must be between 0 and 1")
+        return weight_map
 
 
 class EvidenceCode(BaseModel):
@@ -220,6 +245,7 @@ class EvidenceMapping(BaseModel):
 
     mode: Literal["list", "code_list"]
     list_path: str
+    code_path: Optional[str] = None
     item: Optional[EvidenceItemMapping] = None
     default_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     codes: Dict[str, EvidenceCode] = Field(default_factory=dict)

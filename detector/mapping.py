@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
 
@@ -109,6 +109,13 @@ def _override_matches(override, raw_json: Any) -> bool:
     found = get_path(raw_json, override.path)
     if found is _MISSING:
         return False
+    if override.min_items is not None or override.max_items is not None:
+        if not isinstance(found, list):
+            return False
+        return (
+            (override.min_items is None or len(found) >= override.min_items)
+            and
+            (override.max_items is None or len(found) <= override.max_items))
     if override.contains is not None:
         if not isinstance(found, list):
             return False
@@ -121,7 +128,8 @@ def _override_matches(override, raw_json: Any) -> bool:
     return found == override.equals
 
 
-def _map_label(mapping, raw_json: Any) -> str:
+def _map_label(mapping, raw_json: Any) -> Tuple[str, bool]:
+    """Returns (label, overridden)."""
     raw = get_path(raw_json, mapping.path)
     if raw is _MISSING or raw is None:
         raise MappingError(
@@ -129,8 +137,11 @@ def _map_label(mapping, raw_json: Any) -> str:
 
     for override in mapping.overrides:
         if _override_matches(override, raw_json):
-            return override.value
+            return override.value, True
+    return _label_from_value(mapping, raw), False
 
+
+def _label_from_value(mapping, raw: Any) -> str:
     if mapping.value and mapping.value.map:
         for code, label in mapping.value.map.items():
             if code.lower() == str(raw).lower():
@@ -151,14 +162,25 @@ def _map_label(mapping, raw_json: Any) -> str:
     return mapping.fallback
 
 
-def _map_confidence(mapping, raw_json: Any) -> float:
+def _map_confidence(mapping, raw_json: Any, label: str,
+                    overridden: bool) -> float:
     if mapping is None:
         return 0.0
     raw = get_path(raw_json, mapping.path)
     if raw is _MISSING or raw is None:
         return _clamp01(mapping.default)
-    return _clamp01(
+    number = _clamp01(
         _to_number(raw, f"confidence at {mapping.path}") / mapping.scale)
+    if overridden:
+        return _clamp01(mapping.default)
+    if mapping.measures == "label":
+        return number
+    risk = 1.0 - number if mapping.measures == "safety" else number
+    if label == "scam":
+        return risk
+    if label == "not_scam":
+        return 1.0 - risk
+    return _clamp01(mapping.default)
 
 
 def _map_risk_type(mapping, raw_json: Any) -> Optional[str]:
@@ -184,6 +206,8 @@ def _map_evidence(mapping, raw_json: Any) -> List[Evidence]:
     if mapping.mode == "code_list":
         codes = {k.lower(): v for k, v in mapping.codes.items()}
         for code in items:
+            if mapping.code_path:
+                code = get_path(code, mapping.code_path, None)
             if code is None:
                 continue
             entry = codes.get(str(code).lower())
@@ -201,30 +225,44 @@ def _map_evidence(mapping, raw_json: Any) -> List[Evidence]:
         description = get_path(item, mapping.item.description, None)
         if description is None or not str(description).strip():
             continue
-        weight = mapping.default_weight
-        if mapping.item.weight:
-            raw_weight = get_path(item, mapping.item.weight, None)
-            if raw_weight is not None:
-                try:
-                    weight = _to_number(raw_weight, "evidence weight")
-                except MappingError:
-                    weight = mapping.default_weight
+        description = str(description).strip()
+        if mapping.item.title:
+            title = get_path(item, mapping.item.title, None)
+            if title is not None and str(title).strip():
+                description = f"{str(title).strip()}: {description}"
         evidence.append(
-            Evidence(description=str(description).strip(),
-                     weight=_clamp01(weight)))
+            Evidence(description=description,
+                     weight=_clamp01(_item_weight(mapping, item))))
     return evidence
+
+
+def _item_weight(mapping, item: Any) -> float:
+    if not mapping.item.weight:
+        return mapping.default_weight
+    raw_weight = get_path(item, mapping.item.weight, None)
+    if raw_weight is None:
+        return mapping.default_weight
+    if isinstance(raw_weight, str) and mapping.item.weight_map:
+        words = {k.lower(): v for k, v in mapping.item.weight_map.items()}
+        if raw_weight.strip().lower() in words:
+            return words[raw_weight.strip().lower()]
+    try:
+        return _to_number(raw_weight, "evidence weight")
+    except MappingError:
+        return mapping.default_weight
 
 
 def map_response(response_mapping: ResponseMapping,
                  raw_json: Any) -> DetectionResultCore:
     if not isinstance(raw_json, (dict, list)):
         raise MappingError("the reply is not a JSON object")
-    label = _map_label(response_mapping.label, raw_json)
+    label, overridden = _map_label(response_mapping.label, raw_json)
     try:
         return DetectionResultCore(
             label=label,
             risk_type=_map_risk_type(response_mapping.risk_type, raw_json),
-            confidence=_map_confidence(response_mapping.confidence, raw_json),
+            confidence=_map_confidence(response_mapping.confidence, raw_json,
+                                       label, overridden),
             evidence=_map_evidence(response_mapping.evidence, raw_json),
         )
     except ValidationError as e:

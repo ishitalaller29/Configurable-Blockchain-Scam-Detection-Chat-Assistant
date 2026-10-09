@@ -58,15 +58,15 @@
       "id": "rektradar",
       "name": "RektRadar",
       "mode": "generic",
-      "status": "planned",
+      "status": "live",
       "endpoint": "https://api.rektradar.io/v1/token/{{ address }}",
       "method": "GET",
       "required_input_type": "address",
       "is_llm_based": false,
       "timeout_seconds": 10,
       "//timeout": "Connector's job, not the mapping layer's. Timeouts and 4xx/5xx fail the same way, without running any mapping.",
-      "//auth": "Free tier is anonymous and needs no key, which is how the evaluation ran. REKTRADAR_API_KEY is not in .env yet - a key is expected in Week 2, so the block is configured ready for it.",
-      "auth": { "type": "header", "header_name": "X-API-Key", "value_template": "{api_key}", "api_key": "env:REKTRADAR_API_KEY" },
+      "//auth": "Free tier is anonymous and needs no key (data is ~10 min behind). optional: true sends the key when REKTRADAR_API_KEY is set and calls anonymously when it isn't.",
+      "auth": { "type": "header", "header_name": "X-API-Key", "value_template": "{api_key}", "api_key": "env:REKTRADAR_API_KEY", "optional": true },
       "request": {
         "body_template": {}
       },
@@ -85,9 +85,10 @@
           "fallback": "insufficient_evidence"
         },
         "confidence": {
-          "//": "0-100 to 0-1, clamped. Present-but-non-numeric is a MappingError, not a silent default.",
+          "//": "score is a 0-100 risk, so 'risk' turns it into confidence in the label: scam = score, not_scam = 100 - score. Present-but-non-numeric is a MappingError, not a silent default.",
           "path": "$.score",
-          "scale": 100
+          "scale": 100,
+          "measures": "risk"
         },
         "evidence": {
           "//": "Unknown code -> {description: raw code, weight: default_weight}.",
@@ -103,7 +104,16 @@
             "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 },
             "insufficient_data": { "description": "RektRadar couldn't gather enough on-chain data to judge this token, so a low score means unknown, not safe.", "weight": 0.3 },
             "whitelisted": { "description": "RektRadar lists this as a known, established token.", "weight": 0.6 },
-            "no_graph_data": { "description": "RektRadar has no transaction-graph data for this address, so its score rests on less information.", "weight": 0.2 }
+            "no_graph_data": { "description": "RektRadar has no transaction-graph data for this address, so its score rests on less information.", "weight": 0.2 },
+            "//live_flags": "Codes below were seen in live replies (2026-10-08) but RektRadar doesn't document them, so the wording is our reading of the code name.",
+            "normal_fees": { "description": "Buy and sell fees look normal.", "weight": 0.05 },
+            "hidden_owner": { "description": "The contract has an owner that isn't openly exposed, so control is hidden.", "weight": 0.7 },
+            "blacklist_function": { "description": "The owner can blacklist addresses and stop them trading.", "weight": 0.6 },
+            "trading_control": { "description": "The owner can switch trading on or off.", "weight": 0.6 },
+            "conditional_transfer": { "description": "Transfers only go through under conditions the contract sets.", "weight": 0.6 },
+            "cooldown_mechanism": { "description": "A cooldown limits how often an address can trade.", "weight": 0.3 },
+            "approve_with_transfer": { "description": "Approve logic also moves tokens, which is unusual.", "weight": 0.5 },
+            "mass_funder": { "description": "Linked to a wallet that funds many addresses.", "weight": 0.5 }
           }
         },
         "//risk_type": "Unmapped on purpose - RektRadar has no category field, so it stays null rather than guessed. Documented limitation."
@@ -124,49 +134,142 @@
       "timeout_seconds": 10
     },
     {
+      "//": "Same mapping as rektradar, so the two can't drift apart. No auth - the mock needs no key.",
       "id": "rektradar_mock",
+      "extends": "rektradar",
       "name": "RektRadar (local mock)",
-      "mode": "generic",
       "status": "live",
       "endpoint": "http://localhost:9000/v1/token/{{ address }}",
-      "method": "GET",
+      "auth": null
+    },
+    {
+      "//": "Graph-based ML model that scores a WALLET from its transaction graph (github.com/adrian-io/ethXpose). Uses the author's free hosted app, no key; a live call took ~46s, hence the long timeout. To self-host instead, run its Docker image on port 8002 (the chat app uses 8000) and set endpoint to http://localhost:8002/api/py/classify.",
+      "id": "ethxpose",
+      "name": "EthXpose",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "https://ethxpose.vercel.app/api/classify",
+      "method": "POST",
       "required_input_type": "address",
       "is_llm_based": false,
-      "timeout_seconds": 10,
+      "timeout_seconds": 90,
       "request": {
-        "body_template": {}
+        "body_template": { "wallet_address": "{{ address }}", "model_name": "first_Feather-G_GB.joblib" }
       },
       "response_mapping": {
         "label": {
-          "path": "$.score",
-          "overrides": [
-            { "path": "$.flags", "contains": ["insufficient_data"], "value": "insufficient_evidence" },
-            { "path": "$.analyzed", "equals": false, "value": "insufficient_evidence" }
-          ],
+          "//": "fraud_probability is 0-1. The middle band is too close to call.",
+          "path": "$.fraud_probability",
           "ranges": [
-            { "gte": 70, "value": "scam" },
-            { "lt": 40, "value": "not_scam" }
+            { "gte": 0.7, "value": "scam" },
+            { "lt": 0.3, "value": "not_scam" }
           ],
           "fallback": "insufficient_evidence"
         },
         "confidence": {
-          "path": "$.score",
-          "scale": 100
+          "path": "$.fraud_probability",
+          "measures": "risk"
+        },
+        "//evidence": "None - the reply is a probability plus a transaction graph, with no findings to list."
+      }
+    },
+    {
+      "//": "Static source-code scan for honeypot patterns. Public Cloudflare worker (github.com/Teycir/honeypotscan), 30 requests/min per IP, no key. Only works on contracts with verified source - otherwise it answers HTTP 404.",
+      "id": "honeypotscan",
+      "name": "HoneypotScan",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "https://honeypotscan-api.teycircoder4.workers.dev/",
+      "method": "POST",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": 20,
+      "request": {
+        "body_template": { "address": "{{ address }}" }
+      },
+      "response_mapping": {
+        "label": {
+          "//": "It only says isHoneypot at 2+ patterns, so exactly 1 pattern reads 'safe' there. That is suspicious, not safe.",
+          "path": "$.isHoneypot",
+          "overrides": [
+            { "path": "$.patterns", "min_items": 1, "max_items": 1, "value": "insufficient_evidence" }
+          ],
+          "value": { "map": { "true": "scam", "false": "not_scam" } },
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "//": "Already confidence in its own verdict: 95 for honeypot, 100 for safe.",
+          "path": "$.confidence",
+          "scale": 100,
+          "measures": "label"
         },
         "evidence": {
+          "//": "Descriptions from HoneypotScan's own lib/pattern-explanations.ts. Weights follow its severity: critical 0.9, high 0.75, medium 0.5.",
           "mode": "code_list",
-          "list_path": "$.flags",
-          "default_weight": 0.3,
+          "list_path": "$.patterns",
+          "code_path": "$.name",
+          "default_weight": 0.5,
           "codes": {
-            "honeypot": { "description": "Token can be bought but not sold; funds get trapped.", "weight": 0.95 },
-            "sell_failed": { "description": "Buys succeed but sells revert — classic honeypot.", "weight": 0.9 },
-            "lp_not_locked": { "description": "Liquidity is neither burned nor locked, so it can be pulled.", "weight": 0.6 },
-            "unrestricted_mint": { "description": "Supply can be minted with no access control.", "weight": 0.7 },
-            "no_renounce_ownership": { "description": "The deployer still controls the contract.", "weight": 0.4 },
-            "previous_scam_tokens": { "description": "The deployer has shipped previously flagged scam tokens.", "weight": 0.75 },
-            "insufficient_data": { "description": "RektRadar couldn't gather enough on-chain data to judge this token, so a low score means unknown, not safe.", "weight": 0.3 }
+            "balance_tx_origin": { "description": "balanceOf uses tx.origin to fake the balance it reports.", "weight": 0.9 },
+            "allowance_tx_origin": { "description": "allowance behaves differently depending on tx.origin.", "weight": 0.9 },
+            "transfer_tx_origin": { "description": "transfer checks tx.origin to selectively block transactions.", "weight": 0.9 },
+            "hidden_fee_taxPayer": { "description": "A hidden _taxPayer function uses tx.origin to charge fees.", "weight": 0.75 },
+            "isSuper_tx_origin": { "description": "An _isSuper function grants special privileges based on tx.origin.", "weight": 0.75 },
+            "tx_origin_require": { "description": "A require statement uses tx.origin for access control.", "weight": 0.9 },
+            "tx_origin_if_auth": { "description": "Authentication logic checks tx.origin in if statements.", "weight": 0.75 },
+            "tx_origin_assert": { "description": "An assert statement checks tx.origin.", "weight": 0.9 },
+            "tx_origin_mapping": { "description": "The contract stores tx.origin values in a mapping to track callers.", "weight": 0.5 },
+            "sell_block_pattern": { "description": "Logic explicitly blocks sells to certain recipients.", "weight": 0.9 },
+            "asymmetric_transfer_logic": { "description": "Transfers behave differently for buys and sells.", "weight": 0.75 },
+            "transfer_whitelist_only": { "description": "Transfers only work if the sender or recipient is whitelisted.", "weight": 0.75 },
+            "hidden_sell_tax": { "description": "A hidden sell tax of 95-100% applies.", "weight": 0.9 }
           }
-        }
+        },
+        "//explanation": "Not mapped: its message says 'No honeypot patterns detected' even when 1 pattern was found."
+      }
+    },
+    {
+      "//": "LLM (Claude) reads the verified source and scores it. Uses the author's free hosted app (github.com/amapara27/recon-ethereum-security), no key, ~3 fresh analyses a day (cached repeats are free). Planned, not live: on 2026-10-08 both the hosted app and a local copy failed every analysis because Recon's own code passes 'temperature', which the current Anthropic SDK rejects. On an LLM failure it answers HTTP 200 with only {error}, which fails the label lookup and so reads as an unreadable reply, never a verdict.",
+      "id": "recon",
+      "name": "Recon",
+      "mode": "generic",
+      "status": "planned",
+      "endpoint": "https://reconsecurity.app/api/contract-analyzer",
+      "method": "POST",
+      "required_input_type": "address",
+      "is_llm_based": true,
+      "timeout_seconds": 90,
+      "request": {
+        "body_template": { "address": "{{ address }}" }
+      },
+      "response_mapping": {
+        "label": {
+          "//": "safe_score is 0-100 where 100 = SAFE, so the ranges are the other way round from RektRadar.",
+          "path": "$.safe_score",
+          "ranges": [
+            { "lt": 40, "value": "scam" },
+            { "gte": 70, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "path": "$.safe_score",
+          "scale": 100,
+          "measures": "safety"
+        },
+        "risk_type": { "path": "$.vulnerabilities[0].type" },
+        "evidence": {
+          "mode": "list",
+          "list_path": "$.vulnerabilities",
+          "default_weight": 0.3,
+          "item": {
+            "title": "$.type",
+            "description": "$.description",
+            "weight": "$.severity",
+            "weight_map": { "critical": 0.9, "high": 0.8, "medium": 0.5, "low": 0.2 }
+          }
+        },
+        "explanation": { "path": "$.summary" }
       }
     }
   ],

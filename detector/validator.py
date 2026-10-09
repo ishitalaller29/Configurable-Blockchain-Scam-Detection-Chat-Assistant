@@ -54,12 +54,17 @@ def _check_paths(config: DetectorConfig) -> List[str]:
     if mapping.evidence:
         paths[
             "response_mapping.evidence.list_path"] = mapping.evidence.list_path
+        if mapping.evidence.code_path:
+            paths["response_mapping.evidence.code_path"] = (
+                mapping.evidence.code_path)
         if mapping.evidence.mode == "list":
             item = mapping.evidence.item
             paths[
                 "response_mapping.evidence.item.description"] = item.description
             if item.weight:
                 paths["response_mapping.evidence.item.weight"] = item.weight
+            if item.title:
+                paths["response_mapping.evidence.item.title"] = item.title
     return [
         f"{where} {path!r} is not a valid JSON path (e.g. $.result.score)"
         for where, path in paths.items() if not is_valid_path(path)
