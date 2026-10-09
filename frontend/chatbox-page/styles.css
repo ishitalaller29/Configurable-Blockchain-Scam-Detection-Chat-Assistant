@@ -352,6 +352,7 @@ body {
   border-bottom: 1.5px dotted #1f3a5f;
   cursor: help;
   position: relative;
+  font-weight: 700;
 }
  
 .term-tooltip {
@@ -391,6 +392,57 @@ body {
  
 .citation-pill:hover {
   background: #eef1f4;
+}
+
+.citation-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.citation-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.citation-pill:focus-visible,
+.term:focus-visible {
+  outline: 2px solid #1f3a5f;
+  outline-offset: 2px;
+}
+
+.citation-pill-glossary {
+  background: #f7f9fc;
+  font-family: inherit;
+  line-height: inherit;
+}
+
+.glossary-panel {
+  flex-basis: 100%;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: #f4f5f7;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #33404f;
+}
+
+.glossary-panel[hidden] {
+  display: none;
+}
+
+.glossary-panel dt {
+  font-weight: 700;
+  margin-top: 8px;
+}
+
+.glossary-panel dt:first-child {
+  margin-top: 0;
+}
+
+.glossary-panel dd {
+  margin: 2px 0 0;
 }
  
 .quick-replies {
