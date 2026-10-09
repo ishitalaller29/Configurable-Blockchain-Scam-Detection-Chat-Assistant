@@ -74,6 +74,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const attempt = window.prompt('Enter the admin passphrase');
       if (attempt !== ADMIN_PASSPHRASE) {
         adminToggle.checked = false;
+        sidebar.style.display = 'none';
         if (attempt !== null) {
           window.alert('Incorrect passphrase.');
         }
