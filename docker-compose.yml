@@ -3,6 +3,8 @@ services:
     image: ollama/ollama
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_CONTEXT_LENGTH=8192
     ports:
       - "11434:11434"
 

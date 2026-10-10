@@ -1,9 +1,15 @@
+from typing import Dict
 import json
+import importlib
 import os
 from pathlib import Path
-from typing import Dict
 
+from dotenv import load_dotenv
+
+from llm_providers.base import LLMProvider
 from llm_providers.openai_compatible import OpenAICompatibleProvider
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 LLM_CONFIG = dict(
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
@@ -30,7 +36,16 @@ SUPPORTED_PROVIDERS = (
     "gemini_native",
     "openai_compatible",
 )
-FUNCTIONAL_PROVIDERS = ("openai_compatible", )
+FUNCTIONAL_PROVIDERS = SUPPORTED_PROVIDERS
+
+NATIVE_PROVIDERS = {
+    "openai": ("llm_providers.openai_native", "OpenAINativeProvider",
+               "OPENAI_API_KEY"),
+    "gemini": ("llm_providers.gemini_native", "GeminiNativeProvider",
+               "GEMINI_API_KEY"),
+    "anthropic": ("llm_providers.anthropic_native", "AnthropicNativeProvider",
+                  "ANTHROPIC_API_KEY"),
+}
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "llm_config.json"
 
@@ -65,26 +80,29 @@ def save_agent_config(config: Dict[str, dict]) -> None:
     with open(_CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
+def _build_native(name: str, api_key: str, model: str) -> LLMProvider:
+    module_name, class_name, key_var = NATIVE_PROVIDERS[name]
+    api_key = api_key or os.getenv(key_var)
+    if not api_key:
+        raise ValueError(f"No API key for {name}: set it in the config "
+                         f"or add {key_var} to .env")
+    if not model:
+        raise ValueError(f"No model set for {name}")
+    provider_class = getattr(importlib.import_module(module_name), class_name)
+    return provider_class(api_key=api_key, model=model)
+
 
 def build_provider_for_agent(agent_key: str,
-                              config: Dict[str, dict] = None
-                              ) -> OpenAICompatibleProvider:
-    """Builds the LLM provider for one agent role from its stored config.
-
-    Every provider value currently resolves to OpenAICompatibleProvider,
-    since that is the only adapter implemented so far - openai_native,
-    anthropic_native and gemini_native are each a distinct real integration
-    (different auth, different request/response shape; Anthropic takes the
-    system prompt as a separate field, Gemini uses generateContent with its
-    own role names) and are tracked as Sprint 3 follow-up work, not attempted
-    here. Selecting one of them is honoured in the stored/displayed config
-    (so the UI never lies about what's selected), but functionally this
-    still runs the one real adapter underneath.
-    """
+                             config: Dict[str, dict] = None) -> LLMProvider:
     config = config or load_agent_config()
     agent_config = config.get(agent_key, _DEFAULT_AGENT_CONFIG)
-    # NOTE: when openai_native/anthropic_native/gemini_native adapters exist,
-    # branch on agent_config["provider"] here and construct the matching one.
+    provider = agent_config.get("provider", "openai_compatible")
+    name = provider.removesuffix("_native")  # "openai_native" -> "openai"
+
+    if name in NATIVE_PROVIDERS:
+        return _build_native(name,
+                             agent_config.get("api_key"),
+                             agent_config.get("model"))
     return OpenAICompatibleProvider(
         base_url=agent_config.get("base_url") or LLM_CONFIG["base_url"],
         api_key=agent_config.get("api_key") or LLM_CONFIG["api_key"],
@@ -92,11 +110,15 @@ def build_provider_for_agent(agent_key: str,
     )
 
 
-def build_default_provider() -> OpenAICompatibleProvider:
-    # Kept for any other caller (e.g. cli.py) that still wants one shared
-    # provider built from the original hardcoded LLM_CONFIG.
-    return OpenAICompatibleProvider(
-        base_url=LLM_CONFIG["base_url"],
-        api_key=LLM_CONFIG["api_key"],
-        model=LLM_CONFIG["model"],
-    )
+def build_default_provider() -> LLMProvider:
+    name = os.getenv("LLM_PROVIDER", "openai_compatible").strip().lower()
+    if name == "openai_compatible":
+        return OpenAICompatibleProvider(
+            base_url=LLM_CONFIG["base_url"],
+            api_key=LLM_CONFIG["api_key"],
+            model=LLM_CONFIG["model"],
+        )
+    if name not in NATIVE_PROVIDERS:
+        known = ", ".join(["openai_compatible", *NATIVE_PROVIDERS])
+        raise ValueError(f"Unknown LLM_PROVIDER '{name}' (known: {known})")
+    return _build_native(name, None, os.getenv("LLM_MODEL"))
