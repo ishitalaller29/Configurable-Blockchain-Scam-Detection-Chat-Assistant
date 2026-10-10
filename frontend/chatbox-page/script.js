@@ -16,6 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const llmConfigStatus = document.getElementById('llmConfigStatus');
   const sourceFileInput = document.getElementById('sourceFileInput');
   const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
+  const detectorSelect = document.getElementById('detectorSelect');
+  const detectorStatus = document.getElementById('detectorStatus');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -107,6 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       sidebar.style.display = 'block';
       loadLlmConfig();
+      loadDetectorConfig();
     } else {
       sidebar.style.display = 'none';
     }
@@ -221,6 +224,69 @@ document.addEventListener('DOMContentLoaded', () => {
       llmConfigStatus.textContent = 'Failed to save LLM config.';
     }
   });
+
+  // ---------- Active detector ----------
+  // Picks which detector answers scam checks. "None" sends them to the ScamChecker. Saving starts a fresh conversation on the server, so the thread is cleared to match.
+  const DETECTOR_CONFIG_URL = API_BASE + '/admin/detector';
+  const NO_DETECTOR = '';
+
+  function renderDetectorConfig(data) {
+    if (!detectorSelect) return;
+    detectorSelect.innerHTML = '';
+
+    const none = document.createElement('option');
+    none.value = NO_DETECTOR;
+    none.textContent = 'None (Scam Checker)';
+    detectorSelect.appendChild(none);
+
+    data.detectors.forEach(detector => {
+      const opt = document.createElement('option');
+      opt.value = detector.id;
+      opt.textContent = detector.name || detector.id;
+      if (detector.status !== 'live') opt.textContent += ' (may be unavailable)';
+      detectorSelect.appendChild(opt);
+    });
+    detectorSelect.value = data.active_detector || NO_DETECTOR;
+    detectorSelect.disabled = data.env_override;
+    if (detectorStatus) {
+      detectorStatus.textContent = data.env_override
+        ? 'Set by ACTIVE_DETECTOR on the server - unset it to choose here.'
+        : '';
+    }
+  }
+
+  async function loadDetectorConfig() {
+    try {
+      const res = await fetch(DETECTOR_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      renderDetectorConfig(await res.json());
+    } catch (err) {
+      if (detectorStatus) detectorStatus.textContent = 'Could not load detectors from the server.';
+    }
+  }
+
+  if (detectorSelect) {
+    detectorSelect.addEventListener('change', async () => {
+      const chosen = detectorSelect.value;
+      if (detectorStatus) detectorStatus.textContent = 'Saving…';
+      try {
+        const res = await fetch(DETECTOR_CONFIG_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active_detector: chosen === NO_DETECTOR ? null : chosen }),
+        });
+        if (!res.ok) throw new Error('bad status');
+        renderDetectorConfig(await res.json());
+        thread.innerHTML = '';
+        thread.appendChild(promptHint);
+        promptHint.style.display = '';
+        if (detectorStatus) detectorStatus.textContent = 'Saved - new conversation started.';
+      } catch (err) {
+        if (detectorStatus) detectorStatus.textContent = 'Failed to change detector.';
+        loadDetectorConfig();
+      }
+    });
+  }
 
   function appendUserMsg(text) {
     const div = document.createElement('div');

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
@@ -156,6 +157,23 @@ def get_active_detector(
     if not detector_id or detector_id.lower() in ("none", "null"):
         return None
     return detector_id, get_detector(detector_id, path)
+
+
+_ACTIVE_DETECTOR_LINE = re.compile(r'^(\s*"active_detector":\s*)[^,\n]*', re.M)
+
+
+def set_active_detector(detector_id: Optional[str],
+                        path: Path = CONFIG_PATH) -> None:
+    # None means no detector, so scam_check falls back to the Scam Checker.
+    if detector_id is not None:
+        get_detector(detector_id, path)
+    text = Path(path).read_text()
+    new_text, count = _ACTIVE_DETECTOR_LINE.subn(
+        lambda m: m.group(1) + json.dumps(detector_id), text, count=1)
+    if count == 0:
+        raise ConfigError(f"No active_detector key in {path}")
+    Path(path).write_text(new_text)
+    load_config.cache_clear()
 
 
 def resolve_secret(value: Optional[str]) -> str:
