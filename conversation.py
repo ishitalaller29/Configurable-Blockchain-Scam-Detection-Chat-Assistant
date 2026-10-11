@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
+from agents.forensic_investigator import ForensicInvestigator
 from agents.scam_checker import ScamChecker
 from config_loader import get_active_detector
 from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
@@ -375,6 +376,7 @@ class ChatSession:
             detector_required_input=(self.detector.required_input_type
                                      if self.detector else None))
         self.sc = ScamChecker(sc_provider or provider, temperature, max_tokens)
+        self.fi = ForensicInvestigator(provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
         self.max_history_messages = max_history_messages
@@ -553,6 +555,13 @@ class ChatSession:
                 else:
                     detection_result, questions = self.sc.check(context, notes)
                     detection_source = SOURCE_SCAM_CHECKER
+                    # 3-agent pipeline: BA -> Scam Checker -> Forensic
+                    # Investigator. Falls back to the Scam Checker's own
+                    # explanation if the investigator fails.
+                    detection_result = self.fi.explain(
+                        detection_result, context,
+                        expertise_tier=ba_output.expertise_tier,
+                        use_case=ba_output.use_case)
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
