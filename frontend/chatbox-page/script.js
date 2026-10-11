@@ -11,6 +11,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
   const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
+  const llmConfigRows = document.getElementById('llmConfigRows');
+  const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
+  const llmConfigStatus = document.getElementById('llmConfigStatus');
+  const sourceFileInput = document.getElementById('sourceFileInput');
+  const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
+  const detectorSelect = document.getElementById('detectorSelect');
+  const detectorStatus = document.getElementById('detectorStatus');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -46,19 +53,240 @@ document.addEventListener('DOMContentLoaded', () => {
     item.classList.add('active');
   });
 
+  // "Add source" now ingests an uploaded detector/config file (built from the API
+  // Wrapper Template) rather than just a typed-in name. Clicking the button opens
+  // the hidden file input; the chosen file's name is shown as the new source item.
+  // No actual upload to a backend endpoint yet - wiring that up, and validating the
+  // file against the wrapper template's schema, is backend work for a later sprint.
   addSourceBtn.addEventListener('click', () => {
-    const name = (window.prompt('Name of the source to add') || '').trim();
-    if (!name) return;
+    sourceFileInput.click();
+  });
+
+  sourceFileInput.addEventListener('change', () => {
+    const file = sourceFileInput.files && sourceFileInput.files[0];
+    if (!file) return;
+
     const item = document.createElement('div');
     item.className = 'source-item';
     item.tabIndex = 0;
-    item.dataset.source = name;
-    item.textContent = name;
+    item.dataset.source = file.name;
+    item.textContent = file.name;
     const dot = document.createElement('span');
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+
+    // Reset so selecting the same file again still fires 'change'.
+    sourceFileInput.value = '';
   });
+
+  // Stub only: real deployment of the API Wrapper Template repo as a Docker image
+  // happens in Sprint 3. This just marks where that download call will go, so the
+  // button is wired up and visible now without the actual asset existing yet.
+  downloadTemplateBtn.addEventListener('click', () => {
+    // TODO (Sprint 3): replace with a real download of the API Wrapper Template's
+    // Docker image once that deployment pipeline exists. For now this is a no-op
+    // placeholder so the button renders and is clickable without erroring.
+    console.log('Download API wrapper template - not yet implemented (Sprint 3).');
+  });
+
+  // ---------- Admin password gate ----------
+  // Hardcoded shared passphrase per the client's own suggestion (confirmed
+  // in the technical advisor meeting as the simplest acceptable approach -
+  // real auth/accounts are explicitly out of scope for this project).
+  const ADMIN_PASSPHRASE = 'admin';
+
+  adminToggle.addEventListener('change', () => {
+    if (adminToggle.checked) {
+      const attempt = window.prompt('Enter the admin passphrase');
+      if (attempt !== ADMIN_PASSPHRASE) {
+        adminToggle.checked = false;
+        sidebar.style.display = 'none';
+        if (attempt !== null) {
+          window.alert('Incorrect passphrase.');
+        }
+        return;
+      }
+      sidebar.style.display = 'block';
+      loadLlmConfig();
+      loadDetectorConfig();
+    } else {
+      sidebar.style.display = 'none';
+    }
+  });
+
+  // ---------- LLM Backend config (FR-14) ----------
+  const AGENT_LABELS = {
+    business_analyser: 'Business Analyser',
+    scam_checker: 'Scam Checker',
+    forensic_investigator: 'Forensic Investigator',
+  };
+
+  const LLM_CONFIG_URL = API_BASE + '/admin/llm-config';
+  let llmConfigState = null;
+
+  function renderLlmConfig(data) {
+    llmConfigState = data;
+    llmConfigRows.innerHTML = '';
+
+    Object.keys(AGENT_LABELS).forEach(agentKey => {
+      const agentConfig = data.config[agentKey];
+      if (!agentConfig) return;
+
+      const row = document.createElement('div');
+      row.className = 'llm-agent-row';
+      row.dataset.agent = agentKey;
+
+      const label = document.createElement('p');
+      label.className = 'llm-agent-label';
+      label.textContent = AGENT_LABELS[agentKey];
+      row.appendChild(label);
+
+      const select = document.createElement('select');
+      select.className = 'llm-provider-select';
+      data.supported_providers.forEach(provider => {
+        const opt = document.createElement('option');
+        opt.value = provider;
+        opt.textContent = provider;
+        if (provider === agentConfig.provider) opt.selected = true;
+        select.appendChild(opt);
+      });
+      row.appendChild(select);
+
+      const modelInput = document.createElement('input');
+      modelInput.type = 'text';
+      modelInput.className = 'llm-model-input';
+      modelInput.placeholder = 'Model name';
+      modelInput.value = agentConfig.model || '';
+      row.appendChild(modelInput);
+
+      const note = document.createElement('p');
+      note.className = 'llm-provider-note';
+      const isFunctional = data.functional_providers.includes(agentConfig.provider);
+      note.textContent = isFunctional
+        ? ''
+        : 'Selected, but not yet functional - wired up in Sprint 3.';
+      note.style.display = isFunctional ? 'none' : 'block';
+      row.appendChild(note);
+
+      select.addEventListener('change', () => {
+        const functional = data.functional_providers.includes(select.value);
+        note.textContent = functional
+          ? ''
+          : 'Selected, but not yet functional - wired up in Sprint 3.';
+        note.style.display = functional ? 'none' : 'block';
+      });
+
+      llmConfigRows.appendChild(row);
+    });
+  }
+
+  async function loadLlmConfig() {
+    try {
+      const res = await fetch(LLM_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = '';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Could not load LLM config from the server.';
+    }
+  }
+
+  saveLlmConfigBtn.addEventListener('click', async () => {
+    if (!llmConfigState) return;
+    const config = {};
+    llmConfigRows.querySelectorAll('.llm-agent-row').forEach(row => {
+      const agentKey = row.dataset.agent;
+      const provider = row.querySelector('.llm-provider-select').value;
+      const model = row.querySelector('.llm-model-input').value.trim();
+      const existing = llmConfigState.config[agentKey] || {};
+      config[agentKey] = {
+        provider,
+        model,
+        base_url: existing.base_url || null,
+        api_key: existing.api_key || null,
+      };
+    });
+
+    llmConfigStatus.textContent = 'Saving…';
+    try {
+      const res = await fetch(LLM_CONFIG_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config }),
+      });
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = 'Saved.';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Failed to save LLM config.';
+    }
+  });
+
+  // ---------- Active detector ----------
+  // Picks which detector answers scam checks. "None" sends them to the ScamChecker. Saving starts a fresh conversation on the server, so the thread is cleared to match.
+  const DETECTOR_CONFIG_URL = API_BASE + '/admin/detector';
+  const NO_DETECTOR = '';
+
+  function renderDetectorConfig(data) {
+    if (!detectorSelect) return;
+    detectorSelect.innerHTML = '';
+
+    const none = document.createElement('option');
+    none.value = NO_DETECTOR;
+    none.textContent = 'None (Scam Checker)';
+    detectorSelect.appendChild(none);
+
+    data.detectors.forEach(detector => {
+      const opt = document.createElement('option');
+      opt.value = detector.id;
+      opt.textContent = detector.name || detector.id;
+      if (detector.status !== 'live') opt.textContent += ' (may be unavailable)';
+      detectorSelect.appendChild(opt);
+    });
+    detectorSelect.value = data.active_detector || NO_DETECTOR;
+    detectorSelect.disabled = data.env_override;
+    if (detectorStatus) {
+      detectorStatus.textContent = data.env_override
+        ? 'Set by ACTIVE_DETECTOR on the server - unset it to choose here.'
+        : '';
+    }
+  }
+
+  async function loadDetectorConfig() {
+    try {
+      const res = await fetch(DETECTOR_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      renderDetectorConfig(await res.json());
+    } catch (err) {
+      if (detectorStatus) detectorStatus.textContent = 'Could not load detectors from the server.';
+    }
+  }
+
+  if (detectorSelect) {
+    detectorSelect.addEventListener('change', async () => {
+      const chosen = detectorSelect.value;
+      if (detectorStatus) detectorStatus.textContent = 'Saving…';
+      try {
+        const res = await fetch(DETECTOR_CONFIG_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active_detector: chosen === NO_DETECTOR ? null : chosen }),
+        });
+        if (!res.ok) throw new Error('bad status');
+        renderDetectorConfig(await res.json());
+        thread.innerHTML = '';
+        thread.appendChild(promptHint);
+        promptHint.style.display = '';
+        if (detectorStatus) detectorStatus.textContent = 'Saved - new conversation started.';
+      } catch (err) {
+        if (detectorStatus) detectorStatus.textContent = 'Failed to change detector.';
+        loadDetectorConfig();
+      }
+    });
+  }
 
   function appendUserMsg(text) {
     const div = document.createElement('div');

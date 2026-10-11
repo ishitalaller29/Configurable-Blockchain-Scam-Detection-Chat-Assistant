@@ -357,22 +357,29 @@ class ChatSession:
                  temperature: float = 0.3,
                  max_tokens: int = 800,
                  max_history_messages: int = 500,
-                 send_window_messages: int = 20):
+                 send_window_messages: int = 20,
+                 ba_provider: Optional[LLMProvider] = None,
+                 sc_provider: Optional[LLMProvider] = None):
+        # ba_provider/sc_provider let each agent run on its own configured
+        # LLM backend (FR-14). Both default to `provider` so every existing
+        # caller that passes just one provider keeps working unchanged.
         self.detector: Optional[DetectorConfig] = None
         detector_id = None
         active = get_active_detector()
         if active is not None:
             detector_id, self.detector = active
         self.ba = BusinessAnalyser(
-            provider,
+            ba_provider or provider,
             temperature,
             max_tokens,
             selected_detector=detector_id,
             detector_required_input=(self.detector.required_input_type
                                      if self.detector else None))
-        self.sc = ScamChecker(provider, temperature, max_tokens)
+        
+        self.sc = ScamChecker(sc_provider or provider, temperature, max_tokens)
         # Third agent: rewrites the verdict in plain language for this user.
         # It never changes the label, confidence or evidence.
+
         self.fi = ForensicInvestigator(provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
