@@ -29,10 +29,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
 
-  adminToggle.addEventListener('change', () => {
-    sidebar.style.display = adminToggle.checked ? 'block' : 'none';
-  });
-
   backToStart.addEventListener('click', () => {
     window.location.href = '../starting-page/index.html';
   });
@@ -56,11 +52,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // the hidden file input; the chosen file's name is shown as the new source item.
   // No actual upload to a backend endpoint yet - wiring that up, and validating the
   // file against the wrapper template's schema, is backend work for a later sprint.
+  // The sidebar is admin-only. If one of its elements is ever missing from the page (for example after a merge), warn and skip that wiring instead of throwing, because a throw here stops the rest of the script and the chat box with it.
+  if (!sourceFileInput || !downloadTemplateBtn) {
+    console.warn('Admin sidebar elements missing (sourceFileInput / downloadTemplateBtn); source upload and template download are disabled.');
+  }
+
   addSourceBtn.addEventListener('click', () => {
-    sourceFileInput.click();
+    if (sourceFileInput) sourceFileInput.click();
   });
 
-  sourceFileInput.addEventListener('change', () => {
+  if (sourceFileInput) sourceFileInput.addEventListener('change', () => {
     const file = sourceFileInput.files && sourceFileInput.files[0];
     if (!file) return;
 
@@ -81,7 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Stub only: real deployment of the API Wrapper Template repo as a Docker image
   // happens in Sprint 3. This just marks where that download call will go, so the
   // button is wired up and visible now without the actual asset existing yet.
-  downloadTemplateBtn.addEventListener('click', () => {
+  if (downloadTemplateBtn) downloadTemplateBtn.addEventListener('click', () => {
     // TODO (Sprint 3): replace with a real download of the API Wrapper Template's
     // Docker image once that deployment pipeline exists. For now this is a no-op
     // placeholder so the button renders and is clickable without erroring.
