@@ -375,7 +375,11 @@ class ChatSession:
             selected_detector=detector_id,
             detector_required_input=(self.detector.required_input_type
                                      if self.detector else None))
+        
         self.sc = ScamChecker(sc_provider or provider, temperature, max_tokens)
+        # Third agent: rewrites the verdict in plain language for this user.
+        # It never changes the label, confidence or evidence.
+
         self.fi = ForensicInvestigator(provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
