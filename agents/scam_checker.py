@@ -3,6 +3,7 @@ from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel
 
+from agents.jargon import audience_rule
 from fetchers.context_builder import missing_fields
 from llm_providers.base import LLMProvider
 from schema import AddressContext, DetectionResult, Evidence
@@ -73,6 +74,9 @@ WALLET_RULE = """Wallets vs contracts: when contract.is_contract is false, the a
 # Appended only when the user has answered clarifying questions.
 USER_REPORTED_RULE = """User-reported context: "user_reported_context" (present only when the user has answered your earlier clarifying questions) is the user's own account of how they came across this address - e.g. who sent it, what they were promised, what they were asked to do. It is NOT on-chain evidence and cannot be verified. When it is present you must read it and turn each concrete claim in it into its own evidence item: start each such description with "User reports: " and give it a weight of at most 0.3. Check it against well-known scam patterns: unsolicited DMs, guaranteed or outsized returns, "send X and get more back" giveaway/doubling offers, pressure to act fast, being asked to send funds or approve a token to "unlock", "verify" or "claim" something. If it matches one of these, that is a real warning sign even when the on-chain data is empty - use label "scam" (the confidence stays modest because the evidence is user-reported) and explain the pattern, rather than "insufficient_evidence". Say in the explanation which points came from the user and which from the chain."""
 
+# Added to every verdict prompt, followed by the jargon rule for the user's expertise tier (agents/jargon.py).
+AUDIENCE_INTRO = """Audience wording: the exact field values you quote while reasoning belong in reasoning_trace. The "explanation" and every evidence "description" are read by the user, so word them as the jargon rule below says."""
+
 # A separate, small call made only for an insufficient_evidence verdict, so the main verdict prompt stays unchanged.
 QUESTIONS_PROMPT = """You help a blockchain scam-detection chat assistant that could not reach a verdict on an address because the evidence was too thin.
 
@@ -98,7 +102,9 @@ class ScamChecker:
     def check(
         self,
         context: AddressContext,
-        user_notes: Optional[List[str]] = None
+        user_notes: Optional[List[str]] = None,
+        expertise_tier: Optional[str] = None,
+        use_case: Optional[str] = None
     ) -> Tuple[DetectionResult, List[str]]:
         # Returns the verdict plus the clarifying questions to ask when it's insufficient_evidence.
         payload = compact_context(context)
@@ -108,6 +114,8 @@ class ScamChecker:
         if user_notes:
             prompt += "\n" + USER_REPORTED_RULE + "\n"
             payload = {"user_reported_context": user_notes, **payload}
+        prompt += "\n" + AUDIENCE_INTRO + "\n" + audience_rule(
+            expertise_tier, use_case, compact=True) + "\n"
 
         response = self.provider.generate(
             system_prompt=prompt,
