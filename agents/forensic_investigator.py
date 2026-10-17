@@ -4,6 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from agents.jargon import audience_rule
 from agents.scam_checker import compact_context
 from llm_providers.base import LLMProvider
 from schema import AddressContext, DetectionResult
@@ -27,7 +28,7 @@ Your job is TRANSLATION, not judgment. The detector has already made its decisio
 - If detector_output.evidence is empty, say plainly that the detector did not provide supporting evidence, rather than inventing any.
 - Evidence starting with "User reports:" came from the user, not the blockchain - say so when you mention it.
 
-Audience: if "audience" is given, match it. "beginner" (or no audience) means no jargon - explain terms like "liquidity pool" or "verified contract" in everyday words. "intermediate" can use common crypto terms. "professional" can be precise and technical. For use_case "investigative_legal" or "compliance_risk", keep the tone factual and neutral, suitable for a report.
+Audience: the jargon rule that follows these instructions says how technical your wording should be for this user. Follow it.
 
 Produce:
 - explanation: 2-4 sentences, faithful to the detector's findings. Mention the chain and address that were checked. End with one short offer to explain any of the evidence in more detail.
@@ -56,7 +57,9 @@ class ForensicInvestigator:
                 expertise_tier: Optional[str] = None,
                 use_case: Optional[str] = None) -> DetectionResult:
         payload = {
-            "detector_output": detector_result.model_dump(by_alias=True),
+            # Without the detector's own explanation: a small model would just rework that text, jargon and all, instead of writing for this user from the evidence.
+            "detector_output": detector_result.model_dump(
+                by_alias=True, exclude={"explanation", "reasoning_trace"}),
             "address_context": compact_context(context) if context else None,
         }
         if expertise_tier or use_case:
@@ -67,7 +70,8 @@ class ForensicInvestigator:
 
         try:
             response = self.provider.generate(
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=SYSTEM_PROMPT + "\n" +
+                audience_rule(expertise_tier, use_case) + "\n",
                 messages=[{
                     "role": "user",
                     "content": json.dumps(payload, indent=2)

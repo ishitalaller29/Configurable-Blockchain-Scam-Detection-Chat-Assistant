@@ -83,6 +83,9 @@ class ChatResponse(BaseModel):
     clarifying_questions: List[str] = []
     # Optional quick-reply buttons displayed beneath the assistant response.
     quick_replies: List[str] = []
+    # The user's expertise tier and use case as last worked out, null until known. The page uses the tier to decide how many jargon definitions to show.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -108,6 +111,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
+        expertise_tier=turn.expertise_tier,
+        use_case=turn.use_case,
     )
 
 
