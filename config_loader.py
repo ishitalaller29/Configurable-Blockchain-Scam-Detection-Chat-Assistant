@@ -13,6 +13,8 @@ from schema import DetectorConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "app_config.json"
+# Detectors a user adds from the chat page ("+ add source"). Kept out of app_config.json so the committed config stays the same on every machine; this file is local and not committed.
+ADDED_SOURCES_PATH = PROJECT_ROOT / "config" / "added_sources.json"
 _STORE_ONLY_KEYS = ("id", "status", "extends")
 
 # Real environment variables win over .env, so Docker/CI can override it.
@@ -55,6 +57,26 @@ def _strip_comments(node):
     return node
 
 
+def read_added_detectors(path: Path = ADDED_SOURCES_PATH) -> List[dict]:
+    # A missing or unreadable file means no added sources: a bad local file must not stop the app from starting.
+    try:
+        data = json.loads(Path(path).read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    entries = data.get("detectors") if isinstance(data, dict) else None
+    return [e for e in entries if isinstance(e, dict)
+            ] if isinstance(entries, list) else []
+
+
+def save_added_detectors(entries: List[dict],
+                         path: Path = ADDED_SOURCES_PATH) -> None:
+    path = Path(path)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"detectors": entries}, indent=2))
+    tmp.replace(path)
+    load_config.cache_clear()
+
+
 @lru_cache(maxsize=None)
 def load_config(path: Path = CONFIG_PATH) -> dict:
     try:
@@ -64,7 +86,13 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     except json.JSONDecodeError as e:
         raise ConfigError(
             f"Config file is not valid JSON: {path} ({e})") from e
-    return _strip_comments(raw)
+    config = _strip_comments(raw)
+    if Path(path) == CONFIG_PATH:
+        known = {d.get("id") for d in config.get("detectors", [])}
+        config["detectors"] = list(config.get("detectors", [])) + [
+            d for d in read_added_detectors() if d.get("id") not in known
+        ]
+    return config
 
 
 def get_data_source(source_id: str, path: Path = CONFIG_PATH) -> DataSource:

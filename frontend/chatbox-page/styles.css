@@ -322,6 +322,64 @@ body {
   background: #eef1f4;
 }
  
+.add-source-form {
+  margin-top: 8px;
+}
+
+.add-source-form .form-label {
+  display: block;
+  font-size: 11px;
+  color: #97a0a8;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 8px 0 4px;
+}
+
+.add-source-form input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #cfd5db;
+  font-family: inherit;
+  color: #33404f;
+}
+
+.add-source-form .form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.add-source-form .form-actions .download-template {
+  margin-top: 0;
+}
+
+.wrapper-steps {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #5b6672;
+}
+
+.wrapper-steps summary {
+  cursor: pointer;
+  color: #1f3a5f;
+}
+
+.wrapper-steps ol {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.wrapper-steps code {
+  font-size: 11px;
+  background: #eef1f4;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
 .main-area {
   flex: 1;
   padding: 24px 32px;
