@@ -6,10 +6,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const thread = document.getElementById('thread');
   const promptHint = document.getElementById('promptHint');
   const plusIcon = document.getElementById('plusIcon');
-  const adminToggle = document.getElementById('adminToggle');
+  const adminBtn = document.getElementById('adminBtn');
+  const adminBtnLabel = document.getElementById('adminBtnLabel');
+  const adminDialog = document.getElementById('adminDialog');
+  const adminForm = document.getElementById('adminForm');
+  const adminPass = document.getElementById('adminPass');
+  const adminError = document.getElementById('adminError');
+  const adminCancel = document.getElementById('adminCancel');
+  const attachNote = document.getElementById('attachNote');
   const sidebar = document.getElementById('sidebar');
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
-  const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
   const llmConfigRows = document.getElementById('llmConfigRows');
   const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
@@ -31,18 +37,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
 
-  adminToggle.addEventListener('change', () => {
-    sidebar.style.display = adminToggle.checked ? 'block' : 'none';
-  });
-
   backToStart.addEventListener('click', () => {
     window.location.href = '../starting-page/index.html';
   });
 
+  // File attachments are not supported by the backend yet, so say so instead of faking an attachment.
   plusIcon.addEventListener('click', () => {
-    const chip = cloneTemplate(fileChipTemplate);
-    const inputRow = document.querySelector('.input-row');
-    inputRow.parentNode.insertBefore(chip, inputRow);
+    attachNote.hidden = false;
+    clearTimeout(plusIcon._noteTimer);
+    plusIcon._noteTimer = setTimeout(() => { attachNote.hidden = true; }, 4000);
   });
 
   // ---------- Connected sources (admin sidebar) ----------
@@ -96,23 +99,53 @@ document.addEventListener('DOMContentLoaded', () => {
   // real auth/accounts are explicitly out of scope for this project).
   const ADMIN_PASSPHRASE = 'admin';
 
-  adminToggle.addEventListener('change', () => {
-    if (adminToggle.checked) {
-      const attempt = window.prompt('Enter the admin passphrase');
-      if (attempt !== ADMIN_PASSPHRASE) {
-        adminToggle.checked = false;
-        sidebar.style.display = 'none';
-        if (attempt !== null) {
-          window.alert('Incorrect passphrase.');
-        }
-        return;
-      }
-      sidebar.style.display = 'block';
+  let adminOn = false;
+
+  function setAdmin(on) {
+    adminOn = on;
+    sidebar.style.display = on ? 'block' : 'none';
+    adminBtn.classList.toggle('active', on);
+    adminBtn.setAttribute('aria-pressed', String(on));
+    adminBtnLabel.textContent = on ? 'Admin (exit)' : 'Admin';
+    if (on) {
       loadLlmConfig();
       loadDetectorConfig();
-    } else {
-      sidebar.style.display = 'none';
     }
+  }
+
+  function closeAdminDialog() {
+    adminDialog.hidden = true;
+    adminPass.value = '';
+    adminError.hidden = true;
+    adminBtn.focus();
+  }
+
+  adminBtn.addEventListener('click', () => {
+    if (adminOn) {
+      setAdmin(false);
+      return;
+    }
+    adminDialog.hidden = false;
+    adminPass.focus();
+  });
+
+  adminForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (adminPass.value === ADMIN_PASSPHRASE) {
+      closeAdminDialog();
+      setAdmin(true);
+    } else {
+      adminError.hidden = false;
+      adminPass.select();
+    }
+  });
+
+  adminCancel.addEventListener('click', closeAdminDialog);
+  adminDialog.addEventListener('click', (e) => {
+    if (e.target === adminDialog) closeAdminDialog();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !adminDialog.hidden) closeAdminDialog();
   });
 
   // ---------- LLM Backend config (FR-14) ----------
@@ -330,6 +363,12 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   function evidenceList(evidence) {
+    const box = document.createElement('div');
+    box.className = 'evidence-box';
+    const heading = document.createElement('p');
+    heading.className = 'evidence-box-label';
+    heading.textContent = 'Evidence';
+    box.appendChild(heading);
     const ul = document.createElement('ul');
     ul.className = 'evidence-list';
     // Strongest evidence first - the backend returns it in no particular order.
@@ -342,7 +381,8 @@ document.addEventListener('DOMContentLoaded', () => {
       li.appendChild(weight);
       ul.appendChild(li);
     });
-    return ul;
+    box.appendChild(ul);
+    return box;
   }
 
   function detailBlock(rows) {
