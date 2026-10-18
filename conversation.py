@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
 from agents.forensic_investigator import ForensicInvestigator
@@ -13,7 +13,6 @@ from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
                                      resolve_address)
-from raw_data import build_raw_data
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
@@ -349,8 +348,6 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
-    # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
-    raw_data: Optional[Dict] = None
 
 
 class ChatSession:
@@ -396,10 +393,6 @@ class ChatSession:
         # Whether the assistant has already asked the user for their
         # blockchain familiarity and intended use.
         self._awaiting_profile_clarification = False
-        # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
-        self._turn_context: Optional[AddressContext] = None
-        self._turn_detector_reply: Optional[Tuple[str, Any]] = None
-        self._turn_address: Optional[str] = None
 
     def _remember(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content})
@@ -428,9 +421,7 @@ class ChatSession:
         # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
         chain = ba_output.chain or "ethereum"
         try:
-            context = get_address_context(ba_output, requested_fields)
-            self._turn_context = context
-            return context, None
+            return get_address_context(ba_output, requested_fields), None
         except Exception as e:
             logger.warning("lookup for %s failed: %s", ba_output.raw_input,
                            type(e).__name__)
@@ -462,11 +453,7 @@ class ChatSession:
                                ba_output.raw_input, type(e).__name__)
                 return _lookup_error_reply(e, chain), None, missing
 
-        self._turn_address = address
         outcome = run_detector(config, address, chain, context)
-        if outcome.raw_reply is not None:
-            self._turn_detector_reply = (outcome.detector_name,
-                                         outcome.raw_reply)
         if not outcome.ok:
             return _detector_failed_reply(outcome), None, missing
 
@@ -487,9 +474,6 @@ class ChatSession:
 
         # Only the turn right after questions were asked can be the answer to them.
         answering_for = self._awaiting_answer
-        self._turn_context = None
-        self._turn_detector_reply = None
-        self._turn_address = None
 
         ba_output = self.ba.analyse(self._send_window())
 
@@ -623,8 +607,4 @@ class ChatSession:
                           detection_source=detection_source,
                           detector_name=detector_name,
                           missing_fields=list(missing),
-                          clarifying_questions=questions,
-                          raw_data=build_raw_data(ba_output,
-                                                  self._turn_context,
-                                                  self._turn_detector_reply,
-                                                  self._turn_address))
+                          clarifying_questions=questions)
