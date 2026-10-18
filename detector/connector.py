@@ -35,6 +35,8 @@ class DetectorOutcome:
     error_kind: Optional[str] = None
     error: Optional[str] = None
     notes: List[str] = field(default_factory=list)
+    # The detector's reply as parsed JSON, exactly as it came back. Kept so the raw identifiers in it (tx hashes, addresses) can be shown (see raw_data.py).
+    raw_reply: Any = None
 
 
 def _fail(config: DetectorConfig,
@@ -217,6 +219,7 @@ def run_detector(config: DetectorConfig,
             f"{name} is set up as LLM-based, but its reply had no "
             "explanation text.", notes)
     outcome.notes = notes
+    outcome.raw_reply = raw
     return outcome
 
 
