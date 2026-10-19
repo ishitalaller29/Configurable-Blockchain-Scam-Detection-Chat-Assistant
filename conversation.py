@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -9,11 +10,11 @@ from config_loader import get_active_detector
 from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
                                 run_detector)
 from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
-from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
+from fetchers.etherscan import (ADDRESS_RE, TX_HASH_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
                                      resolve_address)
-from raw_data import build_raw_data
+from raw_data import build_raw_data, merge_raw_data
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
@@ -134,6 +135,8 @@ MISSING_FIELD_WORDS = {
 # One round of clarifying questions per address, so the bot can't loop on asking.
 MAX_CLARIFICATION_ROUNDS = 1
 
+MAX_ADDRESSES_PER_CHECK = 3
+
 # Fixed wording so an insufficient_evidence reply always says so, whatever the LLM's explanation says.
 _INSUFFICIENT_INTRO = "I don't have enough evidence to give a complete verdict on this."
 _FINAL_INSUFFICIENT_INTRO = (
@@ -142,12 +145,15 @@ _FINAL_INSUFFICIENT_INTRO = (
 _QUESTIONS_OUTRO = "That would help me give a more accurate answer."
 _PROFILE_FALLBACK_REPLY = "No problem, pick whichever fits best:"
 
-_PROFILE_FALLBACK_OPTIONS = [
-    "Just checking before I buy or invest",
-    "Investigating this for work (police, legal, compliance)",
-    "I'm a developer/researcher looking into this myself",
-    "Not sure yet, just exploring",
-]
+_PROFILE_FALLBACK_PROFILES = {
+    "Just checking before I buy or invest": ("beginner", "investment"),
+    "Investigating this for work (police, legal, compliance)":
+    ("beginner", "investigative_legal"),
+    "I'm a developer/researcher looking into this myself":
+    ("professional", "investigative_legal"),
+    "Not sure yet, just exploring": ("beginner", "investment"),
+}
+_PROFILE_FALLBACK_OPTIONS = list(_PROFILE_FALLBACK_PROFILES)
 
 def _fallback_questions(context: AddressContext) -> List[str]:
     # Used when the Scam Checker gives none
@@ -174,6 +180,74 @@ def _no_data_reply(context: AddressContext) -> str:
             f"checks on {context.address} just now, so I've got nothing "
             "on-chain to judge it by, and I'd rather not guess. Try asking "
             "again in a minute.")
+
+
+_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_RUN_ON_RE = re.compile(r"(?<=[0-9a-fA-F])(?=0x)")
+
+
+def _hex_inputs(text: str) -> List[Dict[str, str]]:
+    found = []
+    for token in _HEX_RE.findall(_RUN_ON_RE.sub(" ", text)):
+        kind = "tx_hash" if TX_HASH_RE.match(token) else "address"
+        found.append({"type": kind, "value": token})
+    return found
+
+
+def _with_inputs_from(ba_output: BusinessAnalyserOutput, text: str,
+                      answering: bool) -> BusinessAnalyserOutput:
+    found = _hex_inputs(text)
+    if not found or (answering and len(found) < 2):
+        return ba_output
+    data = ba_output.model_dump()
+    data["raw_inputs"] = found + [
+        raw for raw in data["raw_inputs"] if raw["type"] == "token_name"
+    ]
+    data["raw_input"] = None
+    return BusinessAnalyserOutput.model_validate(data)
+
+
+def _typed_by_shape(
+        ba_output: BusinessAnalyserOutput) -> BusinessAnalyserOutput:
+    if not ba_output.raw_inputs:
+        return ba_output
+    data = ba_output.model_dump()
+    for raw in data["raw_inputs"]:
+        value = raw["value"].strip()
+        if TX_HASH_RE.match(value):
+            raw["type"] = "tx_hash"
+        elif ADDRESS_RE.match(value) and raw["type"] in ("tx_hash", "unknown"):
+            raw["type"] = "address"
+    data["raw_input"] = None
+    return BusinessAnalyserOutput.model_validate(data)
+
+
+def _multi_check_reply(checks: List["AddressCheck"],
+                       skipped: List[RawInput]) -> str:
+    parts = [f"I checked {len(checks)} addresses - here's what I found for each:"]
+    for i, check in enumerate(checks, 1):
+        head = f"{i}. {check.input.value}"
+        if check.detection_result is not None:
+            head += f" - {LABEL_WORDS[check.detection_result.label]}"
+        parts.append(head + "\n" + check.reply)
+    if skipped:
+        left_out = ", ".join(raw.value for raw in skipped)
+        parts.append(
+            f"I only check {MAX_ADDRESSES_PER_CHECK} at a time, so I left "
+            f"out {left_out} - send {'it' if len(skipped) == 1 else 'those'} "
+            "in another message and I'll take a look.")
+    return "\n\n".join(parts)
+
+
+def _evidence_notes(result: DetectionResult) -> List[str]:
+    sections = []
+    if result.evidence:
+        sections.append("Evidence behind this verdict:\n" + "\n".join(
+            f"- {e.description} (weight {e.weight:.2f})"
+            for e in result.evidence))
+    if result.reasoning_trace:
+        sections.append("How I reached it:\n" + result.reasoning_trace)
+    return sections
 
 
 def _detector_failed_reply(outcome: DetectorOutcome) -> str:
@@ -337,6 +411,20 @@ def _say_missing(field: str, status: str) -> str:
 
 
 @dataclass
+class AddressCheck:
+    input: RawInput
+    reply: str = ""
+    address: Optional[str] = None
+    detection_result: Optional[DetectionResult] = None
+    detection_source: Optional[str] = None
+    detector_name: Optional[str] = None
+    missing_fields: List[str] = field(default_factory=list)
+    clarifying_questions: List[str] = field(default_factory=list)
+    ask_for: Optional[Tuple[str, str]] = None
+    notes_for: Optional[Tuple[str, str]] = None
+
+
+@dataclass
 class TurnResult:
     reply: str
     ba_output: BusinessAnalyserOutput
@@ -351,6 +439,8 @@ class TurnResult:
     quick_replies: List[str] = field(default_factory=list)
     # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
     raw_data: Optional[Dict] = None
+    address_checks: List[AddressCheck] = field(default_factory=list)
+    skipped_inputs: List[str] = field(default_factory=list)
 
 
 class ChatSession:
@@ -396,6 +486,8 @@ class ChatSession:
         # Whether the assistant has already asked the user for their
         # blockchain familiarity and intended use.
         self._awaiting_profile_clarification = False
+        self._profile: Optional[Tuple[str, str]] = None
+        self._pending_request: Optional[str] = None
         # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
         self._turn_context: Optional[AddressContext] = None
         self._turn_detector_reply: Optional[Tuple[str, Any]] = None
@@ -498,12 +590,30 @@ class ChatSession:
 
         ba_output = self.ba.analyse(self._send_window())
 
+        picked = _PROFILE_FALLBACK_PROFILES.get(user_text.strip())
+        if picked is not None:
+            self._profile = picked
+        elif (not ba_output.needs_clarification and ba_output.expertise_tier
+              and ba_output.use_case):
+            self._profile = (ba_output.expertise_tier, ba_output.use_case)
+        if (self._profile is not None
+                and ba_output.request_type in ("scam_check", "address_info")):
+            tier, use_case = self._profile
+            ba_output = ba_output.model_copy(
+                update={
+                    "needs_clarification": False,
+                    "expertise_tier": ba_output.expertise_tier or tier,
+                    "use_case": ba_output.use_case or use_case,
+                })
+
         if ba_output.needs_clarification:
             if self._awaiting_profile_clarification:
                 reply = _PROFILE_FALLBACK_REPLY
                 quick_replies = list(_PROFILE_FALLBACK_OPTIONS)
 
                 self._awaiting_profile_clarification = False
+                self._pending_request = "\n".join(
+                    filter(None, [self._pending_request, user_text]))
             else:
                 reply = (
                     ba_output.direct_response
@@ -512,6 +622,8 @@ class ChatSession:
                 )
                 quick_replies = []
                 self._awaiting_profile_clarification = True
+                self._pending_request = "\n".join(
+                    filter(None, [self._pending_request, user_text]))
 
             self._remember("assistant", reply)
 
@@ -522,14 +634,24 @@ class ChatSession:
             )
 
         self._awaiting_profile_clarification = False
+        if ba_output.request_type == "scam_check":
+            ba_output = _with_inputs_from(
+                ba_output,
+                "\n".join(filter(None, [self._pending_request, user_text])),
+                answering=answering_for is not None)
+        if ba_output.request_type in ("scam_check", "address_info"):
+            ba_output = _typed_by_shape(ba_output)
 
         detection_result = None
         detection_source = None
         detector_name = None
-        missing: Dict[str, str] = {}
+        missing: List[str] = []
         questions: List[str] = []
         ask_for: Optional[Tuple[str, str]] = None
         notes_for: Optional[Tuple[str, str]] = None
+        address_checks: List[AddressCheck] = []
+        skipped: List[RawInput] = []
+        raw_data: Optional[Dict] = None
 
         if not ba_output.in_scope:
             reply = ba_output.direct_response or "That's outside what I can help with."
@@ -540,50 +662,30 @@ class ChatSession:
                 context, reply = self._fetch_context(
                     ba_output, ba_output.requested_fields)
                 if context is not None:
-                    missing = missing_fields(context)
+                    missing = list(missing_fields(context))
                     reply = format_address_info(context,
                                                 ba_output.requested_fields)
         elif ba_output.request_type != "scam_check":
             reply = ba_output.direct_response or "I can't help with that yet."
-        elif not is_supported(ba_output.raw_input):
-            reply = _unresolved_input_reply(ba_output.raw_input)
-        elif ba_output.detector_configured:
-            reply, detection_result, missing = self._detector_check(ba_output)
-            if detection_result is not None:
-                detection_source = SOURCE_DETECTOR
-                detector_name = self.detector.name
+        elif len(ba_output.raw_inputs) > 1:
+            address_checks, raw_data = self._multi_scam_check(
+                ba_output, user_text, answering_for)
+            skipped = ba_output.raw_inputs[MAX_ADDRESSES_PER_CHECK:]
+            reply = _multi_check_reply(address_checks, skipped)
+            notes_for = next((c.notes_for for c in address_checks
+                              if c.notes_for is not None), None)
         else:
-            context, reply = self._fetch_context(ba_output)
-            if context is not None:
-                missing = missing_fields(context)
-                key = (context.chain.lower(), context.address.lower())
-                notes = self._user_notes.get(key, [])
-                if answering_for == key:
-                    notes = notes + [user_text]
-                    notes_for = key
+            check = self._scam_check_one(ba_output, user_text, answering_for)
+            reply = check.reply
+            detection_result = check.detection_result
+            detection_source = check.detection_source
+            detector_name = check.detector_name
+            missing = check.missing_fields
+            questions = check.clarifying_questions
+            ask_for = check.ask_for
+            notes_for = check.notes_for
 
-                can_ask = self._rounds_asked.get(key,
-                                                 0) < MAX_CLARIFICATION_ROUNDS
-                if len(missing) >= len(FETCHERS):
-                    reply = _no_data_reply(context)
-                    questions = _fallback_questions(context)
-                else:
-                    detection_result, questions = self.sc.check(context, notes)
-                    print(">>> SCAM CHECKER RAN", flush=True)
-                    detection_source = SOURCE_SCAM_CHECKER
-                    reply = summarize_detection(detection_result)
-                    if detection_result.label == "insufficient_evidence":
-                        questions = questions or _fallback_questions(context)
-                        intro = (_FINAL_INSUFFICIENT_INTRO if not can_ask
-                                 and notes else _INSUFFICIENT_INTRO)
-                        reply = intro + " " + reply
-
-                if questions and can_ask:
-                    ask_for = key
-                    reply = _with_questions(reply, questions)
-                else:
-                    questions = []
-
+        self._pending_request = None
         if notes_for is not None:
             self._user_notes[notes_for] = self._user_notes.get(
                 notes_for, []) + [user_text]
@@ -592,27 +694,120 @@ class ChatSession:
                                                                  0) + 1
         self._awaiting_answer = ask_for
 
-        remembered = reply
+        sections = []
         if detection_result is not None:
-            sections = []
-            if detection_result.evidence:
-                sections.append("Evidence behind this verdict:\n" + "\n".join(
-                    f"- {e.description} (weight {e.weight:.2f})"
-                    for e in detection_result.evidence))
-            if detection_result.reasoning_trace:
-                sections.append("How I reached it:\n" +
-                                detection_result.reasoning_trace)
-            if sections:
-                remembered = reply + "\n\n" + "\n\n".join(sections)
+            sections = _evidence_notes(detection_result)
+        for i, check in enumerate(address_checks, 1):
+            if check.detection_result is not None:
+                sections += [f"Address {i} ({check.input.value}) - {note}"
+                             for note in _evidence_notes(check.detection_result)]
+        remembered = reply
+        if sections:
+            remembered = reply + "\n\n" + "\n\n".join(sections)
         self._remember("assistant", remembered)
+        if not address_checks:
+            raw_data = build_raw_data(ba_output, self._turn_context,
+                                      self._turn_detector_reply,
+                                      self._turn_address)
         return TurnResult(reply=reply,
                           ba_output=ba_output,
                           detection_result=detection_result,
                           detection_source=detection_source,
                           detector_name=detector_name,
-                          missing_fields=list(missing),
+                          missing_fields=missing,
                           clarifying_questions=questions,
-                          raw_data=build_raw_data(ba_output,
-                                                  self._turn_context,
-                                                  self._turn_detector_reply,
-                                                  self._turn_address))
+                          raw_data=raw_data,
+                          address_checks=address_checks,
+                          skipped_inputs=[raw.value for raw in skipped])
+
+    def _scam_check_one(self,
+                        ba_output: BusinessAnalyserOutput,
+                        user_text: str,
+                        answering_for: Optional[Tuple[str, str]],
+                        allow_questions: bool = True) -> AddressCheck:
+        check = AddressCheck(input=ba_output.raw_input)
+        if not is_supported(ba_output.raw_input):
+            check.reply = _unresolved_input_reply(ba_output.raw_input)
+            return check
+
+        if ba_output.detector_configured:
+            reply, result, missing = self._detector_check(ba_output)
+            check.reply = reply
+            check.address = self._turn_address
+            check.missing_fields = list(missing)
+            if result is not None:
+                check.detection_result = result
+                check.detection_source = SOURCE_DETECTOR
+                check.detector_name = self.detector.name
+            return check
+
+        context, reply = self._fetch_context(ba_output)
+        check.reply = reply
+        if context is None:
+            return check
+        check.address = context.address
+        missing = missing_fields(context)
+        check.missing_fields = list(missing)
+        key = (context.chain.lower(), context.address.lower())
+        notes = self._user_notes.get(key, [])
+        if answering_for == key:
+            notes = notes + [user_text]
+            check.notes_for = key
+
+        can_ask = (allow_questions and self._rounds_asked.get(key, 0)
+                   < MAX_CLARIFICATION_ROUNDS)
+        questions: List[str] = []
+        if len(missing) >= len(FETCHERS):
+            check.reply = _no_data_reply(context)
+            questions = _fallback_questions(context)
+        else:
+            result, questions = self.sc.check(context, notes)
+            print(">>> SCAM CHECKER RAN", flush=True)
+            check.detection_result = result
+            check.detection_source = SOURCE_SCAM_CHECKER
+            check.reply = summarize_detection(result)
+            if result.label == "insufficient_evidence":
+                questions = questions or _fallback_questions(context)
+                last_round = self._rounds_asked.get(
+                    key, 0) >= MAX_CLARIFICATION_ROUNDS
+                intro = (_FINAL_INSUFFICIENT_INTRO
+                         if last_round and notes else _INSUFFICIENT_INTRO)
+                check.reply = intro + " " + check.reply
+
+        if questions and can_ask:
+            check.ask_for = key
+            check.clarifying_questions = questions
+            check.reply = _with_questions(check.reply, questions)
+        return check
+
+    def _multi_scam_check(
+        self, ba_output: BusinessAnalyserOutput, user_text: str,
+        answering_for: Optional[Tuple[str, str]]
+    ) -> Tuple[List[AddressCheck], Optional[Dict]]:
+        checks: List[AddressCheck] = []
+        raw_parts = []
+        for raw_input in ba_output.raw_inputs[:MAX_ADDRESSES_PER_CHECK]:
+            single = ba_output.model_copy(update={
+                "raw_input": raw_input,
+                "raw_inputs": [raw_input]
+            })
+            self._turn_context = None
+            self._turn_detector_reply = None
+            self._turn_address = None
+            try:
+                check = self._scam_check_one(single,
+                                             user_text,
+                                             answering_for,
+                                             allow_questions=False)
+            except Exception as e:
+                logger.warning("scam check on %s failed: %s", raw_input,
+                               type(e).__name__)
+                check = AddressCheck(
+                    input=raw_input,
+                    reply="I couldn't finish checking this one just now - "
+                    "ask me about it again in a minute.")
+            checks.append(check)
+            raw_parts.append(
+                build_raw_data(single, self._turn_context,
+                               self._turn_detector_reply, self._turn_address))
+        return checks, merge_raw_data(raw_parts)

@@ -66,6 +66,27 @@ class Evidence(BaseModel):
     weight: float
 
 
+class AddressResult(BaseModel):
+    input: str
+    input_type: str
+    address: Optional[str] = None
+    reply: str
+    label: Optional[str] = None
+    confidence: Optional[float] = None
+    risk_type: Optional[str] = None
+    evidence: List[Evidence] = []
+    source: Optional[str] = None
+    detector_name: Optional[str] = None
+    missing_fields: List[str] = []
+
+
+def _evidence(det) -> List[Evidence]:
+    return [
+        Evidence(description=e.description, weight=e.weight)
+        for e in det.evidence
+    ] if det else []
+
+
 class ChatResponse(BaseModel):
     # The text the CLI prints.
     reply: str
@@ -85,6 +106,8 @@ class ChatResponse(BaseModel):
     quick_replies: List[str] = []
     # The raw identifiers the data sources returned for this reply (see raw_data.py): {chain, queried_address, sources, items: [{type, value, field, source}]}. Null when the message wasn't about an address. type is transaction_hash, contract_address, wallet_address, account_address, address or block_hash.
     raw_data: Optional[dict] = None
+    results: List[AddressResult] = []
+    skipped_inputs: List[str] = []
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -101,16 +124,31 @@ def chat(req: ChatRequest) -> ChatResponse:
         label=det.label if det else None,
         confidence=det.confidence if det else None,
         risk_type=det.risk_type if det else None,
-        evidence=[
-            Evidence(description=e.description, weight=e.weight)
-            for e in det.evidence
-        ] if det else [],
+        evidence=_evidence(det),
         source=turn.detection_source,
         detector_name=turn.detector_name,
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
         raw_data=turn.raw_data,
+        results=[
+            AddressResult(
+                input=c.input.value,
+                input_type=c.input.type,
+                address=c.address,
+                reply=c.reply,
+                label=c.detection_result.label if c.detection_result else None,
+                confidence=(c.detection_result.confidence
+                            if c.detection_result else None),
+                risk_type=(c.detection_result.risk_type
+                           if c.detection_result else None),
+                evidence=_evidence(c.detection_result),
+                source=c.detection_source,
+                detector_name=c.detector_name,
+                missing_fields=c.missing_fields,
+            ) for c in turn.address_checks
+        ],
+        skipped_inputs=turn.skipped_inputs,
     )
 
 
