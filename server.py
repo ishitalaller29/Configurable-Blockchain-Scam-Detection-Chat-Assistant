@@ -49,12 +49,25 @@ _ba_provider = build_provider_for_agent("business_analyser", _agent_config)
 _sc_provider = build_provider_for_agent("scam_checker", _agent_config)
 
 
+# What the assistant is doing right now, shown in the chat's thinking bubble. The page polls GET /chat/status while it waits for POST /chat. Empty when idle.
+_status_text = ""
+_status_lock = threading.Lock()
+
+
+def _set_status(message: str) -> None:
+    global _status_text
+    with _status_lock:
+        _status_text = message
+
+
 def _new_session() -> ChatSession:
-    return ChatSession(_ba_provider,
-                       temperature=LLM_CONFIG["temperature"],
-                       max_tokens=LLM_CONFIG["max_tokens"],
-                       ba_provider=_ba_provider,
-                       sc_provider=_sc_provider)
+    session = ChatSession(_ba_provider,
+                          temperature=LLM_CONFIG["temperature"],
+                          max_tokens=LLM_CONFIG["max_tokens"],
+                          ba_provider=_ba_provider,
+                          sc_provider=_sc_provider)
+    session.on_status = _set_status
+    return session
 
 
 _session = _new_session()
@@ -93,8 +106,12 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    with _session_lock:
-        turn = _session.handle_message(req.message)
+    _set_status("")
+    try:
+        with _session_lock:
+            turn = _session.handle_message(req.message)
+    finally:
+        _set_status("")
 
     ba = turn.ba_output
     det = turn.detection_result
@@ -116,6 +133,17 @@ def chat(req: ChatRequest) -> ChatResponse:
         quick_replies=turn.quick_replies,
         raw_data=turn.raw_data,
     )
+
+
+class StatusResponse(BaseModel):
+    status: str
+
+
+@app.get("/chat/status", response_model=StatusResponse)
+def chat_status() -> StatusResponse:
+    # Not behind _session_lock, so it answers while /chat is still running.
+    with _status_lock:
+        return StatusResponse(status=_status_text)
 
 
 class SessionResetResponse(BaseModel):

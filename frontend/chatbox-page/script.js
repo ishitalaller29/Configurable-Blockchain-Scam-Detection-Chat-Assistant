@@ -38,6 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ? 'http://localhost:8000'
     : '';
   const CHAT_API_URL = API_BASE + '/chat';
+  const CHAT_STATUS_URL = API_BASE + '/chat/status';
   const RESET_API_URL = API_BASE + '/session/reset';
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
@@ -568,6 +569,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return appendAiMsg('Thinking…', 'msg-pending');
   }
 
+  // While the answer is being worked out, ask the server what it is doing and show that in the pending bubble. Returns a function that stops the polling.
+  function startStatusPolling(pending) {
+    const label = pending.querySelector('.msg-ai-text');
+    let stopped = false;
+    let timer = null;
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch(CHAT_STATUS_URL);
+        if (res.ok && !stopped) {
+          const data = await res.json();
+          if (data.status && label) label.textContent = data.status + '…';
+        }
+      } catch (err) {
+        // Status is cosmetic. The bubble keeps its last text.
+      }
+      if (!stopped) timer = setTimeout(poll, 400);
+    }
+
+    timer = setTimeout(poll, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
   function appendErrorMsg(title, text) {
     appendAiMsg(text, 'msg-error', title);
   }
@@ -586,14 +614,17 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInput.disabled = true;
     sending = true;
     const pending = appendPendingMsg();
+    let stopStatus = () => {};
 
     try {
       await sessionReady;
+      stopStatus = startStatusPolling(pending);
       const res = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
+      stopStatus();
       pending.remove();
 
       if (!res.ok) {
@@ -608,6 +639,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       appendReply(data);
     } catch (err) {
+      stopStatus();
       pending.remove();
       appendErrorMsg(
         'Connection issue',

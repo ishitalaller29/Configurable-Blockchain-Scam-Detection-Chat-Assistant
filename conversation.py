@@ -1,6 +1,10 @@
 import logging
 from dataclasses import dataclass, field
+<<<<<<< HEAD
+from typing import Callable, Dict, List, Optional, Tuple
+=======
 from typing import Any, Dict, List, Optional, Tuple
+>>>>>>> release
 
 from agents.business_analyser import BusinessAnalyser
 from agents.forensic_investigator import ForensicInvestigator
@@ -396,6 +400,8 @@ class ChatSession:
         # Whether the assistant has already asked the user for their
         # blockchain familiarity and intended use.
         self._awaiting_profile_clarification = False
+        # Live status for the chat's thinking bubble. The server swaps in a function that stores the text. It is a no-op everywhere else.
+        self.on_status: Callable[[str], None] = lambda message: None
         # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
         self._turn_context: Optional[AddressContext] = None
         self._turn_detector_reply: Optional[Tuple[str, Any]] = None
@@ -411,6 +417,12 @@ class ChatSession:
         if window and window[0]["role"] == "assistant":
             window = window[1:]
         return window
+
+    def _status(self, message: str) -> None:
+        try:
+            self.on_status(message)
+        except Exception:
+            logger.debug("status callback failed", exc_info=True)
 
     def handle_message(self, user_text: str) -> TurnResult:
         self._remember("user", user_text)
@@ -428,9 +440,11 @@ class ChatSession:
         # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
         chain = ba_output.chain or "ethereum"
         try:
-            context = get_address_context(ba_output, requested_fields)
+            context = get_address_context(ba_output, requested_fields,
+                                          self._status)
             self._turn_context = context
             return context, None
+        
         except Exception as e:
             logger.warning("lookup for %s failed: %s", ba_output.raw_input,
                            type(e).__name__)
@@ -462,6 +476,7 @@ class ChatSession:
                                ba_output.raw_input, type(e).__name__)
                 return _lookup_error_reply(e, chain), None, missing
 
+        self._status(f"Comparing the address against {config.name}")
         self._turn_address = address
         outcome = run_detector(config, address, chain, context)
         if outcome.raw_reply is not None:
@@ -496,6 +511,7 @@ class ChatSession:
         self._turn_detector_reply = None
         self._turn_address = None
 
+        self._status("Reading your message")
         ba_output = self.ba.analyse(self._send_window())
 
         if ba_output.needs_clarification:
@@ -568,9 +584,18 @@ class ChatSession:
                     reply = _no_data_reply(context)
                     questions = _fallback_questions(context)
                 else:
+                    self._status("Analysing the evidence")
                     detection_result, questions = self.sc.check(context, notes)
                     print(">>> SCAM CHECKER RAN", flush=True)
                     detection_source = SOURCE_SCAM_CHECKER
+                    # 3-agent pipeline: BA -> Scam Checker -> Forensic
+                    # Investigator. Falls back to the Scam Checker's own
+                    # explanation if the investigator fails.
+                    self._status("Writing the explanation")
+                    detection_result = self.fi.explain(
+                        detection_result, context,
+                        expertise_tier=ba_output.expertise_tier,
+                        use_case=ba_output.use_case)
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
