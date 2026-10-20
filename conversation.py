@@ -1,6 +1,10 @@
 import logging
 from dataclasses import dataclass, field
+<<<<<<< HEAD
 from typing import Callable, Dict, List, Optional, Tuple
+=======
+from typing import Any, Dict, List, Optional, Tuple
+>>>>>>> release
 
 from agents.business_analyser import BusinessAnalyser
 from agents.forensic_investigator import ForensicInvestigator
@@ -13,6 +17,7 @@ from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
                                      resolve_address)
+from raw_data import build_raw_data
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
@@ -348,6 +353,8 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
+    # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
+    raw_data: Optional[Dict] = None
 
 
 class ChatSession:
@@ -395,6 +402,10 @@ class ChatSession:
         self._awaiting_profile_clarification = False
         # Live status for the chat's thinking bubble. The server swaps in a function that stores the text. It is a no-op everywhere else.
         self.on_status: Callable[[str], None] = lambda message: None
+        # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
+        self._turn_context: Optional[AddressContext] = None
+        self._turn_detector_reply: Optional[Tuple[str, Any]] = None
+        self._turn_address: Optional[str] = None
 
     def _remember(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content})
@@ -429,8 +440,11 @@ class ChatSession:
         # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
         chain = ba_output.chain or "ethereum"
         try:
-            return get_address_context(ba_output, requested_fields,
-                                       self._status), None
+            context = get_address_context(ba_output, requested_fields,
+                                          self._status)
+            self._turn_context = context
+            return context, None
+        
         except Exception as e:
             logger.warning("lookup for %s failed: %s", ba_output.raw_input,
                            type(e).__name__)
@@ -463,7 +477,11 @@ class ChatSession:
                 return _lookup_error_reply(e, chain), None, missing
 
         self._status(f"Comparing the address against {config.name}")
+        self._turn_address = address
         outcome = run_detector(config, address, chain, context)
+        if outcome.raw_reply is not None:
+            self._turn_detector_reply = (outcome.detector_name,
+                                         outcome.raw_reply)
         if not outcome.ok:
             return _detector_failed_reply(outcome), None, missing
 
@@ -472,6 +490,12 @@ class ChatSession:
         if not config.is_llm_based:
             result = explain_detector_result(result, outcome.detector_name,
                                              context)
+            print(">>> EXPLAIN_DETECTOR_RESULT RAN", flush=True)
+            result = self.fi.explain(
+                result, context,
+                expertise_tier=ba_output.expertise_tier,
+                use_case=ba_output.use_case)
+            print(">>> FORENSIC INVESTIGATOR RAN", flush=True)
         reply = summarize_detection(result)
         if result.label == "insufficient_evidence":
             reply = _INSUFFICIENT_INTRO + " " + reply
@@ -482,26 +506,21 @@ class ChatSession:
     def _run_turn(self) -> TurnResult:
         user_text = self.history[-1]["content"]
 
-        # Only the turn right after questions were asked can be the answer to them.
         answering_for = self._awaiting_answer
+        self._turn_context = None
+        self._turn_detector_reply = None
+        self._turn_address = None
 
         self._status("Reading your message")
         ba_output = self.ba.analyse(self._send_window())
 
-        # The Business Analyser could not confidently determine the user's
-        # expertise/use case.
         if ba_output.needs_clarification:
             if self._awaiting_profile_clarification:
-                # We already asked an open clarification question and the answer
-                # was still ambiguous, so fall back to the wireframe's options.
                 reply = _PROFILE_FALLBACK_REPLY
                 quick_replies = list(_PROFILE_FALLBACK_OPTIONS)
 
-                # The fallback has now replaced the open-ended clarification.
                 self._awaiting_profile_clarification = False
             else:
-                # First attempt: use the natural leading question generated by
-                # the Business Analyser.
                 reply = (
                     ba_output.direct_response
                     or "Just so I can explain things the right way, have you used "
@@ -518,7 +537,6 @@ class ChatSession:
                 quick_replies=quick_replies,
             )
 
-        # Profile information was successfully inferred.
         self._awaiting_profile_clarification = False
 
         detection_result = None
@@ -555,7 +573,6 @@ class ChatSession:
             if context is not None:
                 missing = missing_fields(context)
                 key = (context.chain.lower(), context.address.lower())
-                # The user's answer is extra (user-reported) evidence for the address the questions were about. Moving on to a different address is a fresh check, not an answer.
                 notes = self._user_notes.get(key, [])
                 if answering_for == key:
                     notes = notes + [user_text]
@@ -564,12 +581,12 @@ class ChatSession:
                 can_ask = self._rounds_asked.get(key,
                                                  0) < MAX_CLARIFICATION_ROUNDS
                 if len(missing) >= len(FETCHERS):
-                    # Nothing on-chain came back, so there's nothing for the Scam Checker to ground a verdict in.
                     reply = _no_data_reply(context)
                     questions = _fallback_questions(context)
                 else:
                     self._status("Analysing the evidence")
                     detection_result, questions = self.sc.check(context, notes)
+                    print(">>> SCAM CHECKER RAN", flush=True)
                     detection_source = SOURCE_SCAM_CHECKER
                     # 3-agent pipeline: BA -> Scam Checker -> Forensic
                     # Investigator. Falls back to the Scam Checker's own
@@ -592,7 +609,6 @@ class ChatSession:
                 else:
                     questions = []
 
-        # State only changes once the turn has succeeded, so a failed turn (rolled back in handle_message) leaves it as it was.
         if notes_for is not None:
             self._user_notes[notes_for] = self._user_notes.get(
                 notes_for, []) + [user_text]
@@ -620,4 +636,8 @@ class ChatSession:
                           detection_source=detection_source,
                           detector_name=detector_name,
                           missing_fields=list(missing),
-                          clarifying_questions=questions)
+                          clarifying_questions=questions,
+                          raw_data=build_raw_data(ba_output,
+                                                  self._turn_context,
+                                                  self._turn_detector_reply,
+                                                  self._turn_address))

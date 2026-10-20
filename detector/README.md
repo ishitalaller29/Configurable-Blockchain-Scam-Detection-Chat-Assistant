@@ -60,3 +60,25 @@ failed and why, with no verdict shown.
 | 4xx (401/403 → "API key missing or wrong", 429 → rate limited) | `rejected` | no |
 | Not JSON, over 1 MB, required field (label) missing, confidence present but not a number, template reply not in schema | `unreadable` | stopped with `MappingError` |
 
+
+## Adding a Detector API Wrapper from the chat page
+
+The wrapper is a separate repo that is built and run as its own container
+(its README, "Docker image setup"). In the admin sidebar, **Download API
+wrapper template** gives the user its setup as a ZIP, and **+ add source**
+takes the address of the running container (for example
+`http://localhost:8002`; the chat app already uses 8000).
+
+`POST /admin/sources` (`detector/wrapper_source.py`) checks the address is
+https or localhost, calls the wrapper's `GET /health` and `GET /status`
+(a detector must be configured, and it must take `required_input_type:
+address`), then saves a `generic` detector entry for `POST /call` to
+`config/added_sources.json` (local, not committed). The entry reads the
+wrapper's envelope: `$.result.label`, `$.result.confidence`,
+`$.result.risk_type` and `$.result.evidence`. It appears in the Active
+Detector list with an id starting `wrapper_`.
+
+Not covered yet: wrappers whose detector needs `address_with_context`,
+removing an added source, and a friendlier message when the wrapper answers
+`status: "error"` (the user sees "couldn't be read").
+

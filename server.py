@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,8 +28,12 @@ from config import (AGENT_KEYS, FUNCTIONAL_PROVIDERS, LLM_CONFIG,
 from config_loader import (ConfigError, get_active_detector, list_detectors,
                            set_active_detector)
 from conversation import ChatSession
+from detector.wrapper_source import ADDED_PREFIX, SourceError, register_wrapper
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+# The Detector API Wrapper's Docker setup (its Dockerfile, docker-compose.yml, .env.example and source), as a ZIP of the wrapper repo's develop branch.
+WRAPPER_TEMPLATE_PATH = (Path(__file__).resolve().parent / "downloads" /
+                         "detector-api-wrapper-template.zip")
 
 app = FastAPI(title="Scam-Detection Chat Assistant API")
 
@@ -96,6 +100,8 @@ class ChatResponse(BaseModel):
     clarifying_questions: List[str] = []
     # Optional quick-reply buttons displayed beneath the assistant response.
     quick_replies: List[str] = []
+    # The raw identifiers the data sources returned for this reply (see raw_data.py): {chain, queried_address, sources, items: [{type, value, field, source}]}. Null when the message wasn't about an address. type is transaction_hash, contract_address, wallet_address, account_address, address or block_hash.
+    raw_data: Optional[dict] = None
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -125,6 +131,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
+        raw_data=turn.raw_data,
     )
 
 
@@ -213,8 +220,13 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> LLMConfigResponse:
     )
 
 
-# Active detector dropdown. Only the four real detectors are offered
+# Active detector dropdown. Only the four real detectors are offered, plus any wrapper the user added with "+ add source".
 SELECTABLE_DETECTORS = ("rektradar", "ethxpose", "honeypotscan", "recon")
+
+
+def _is_selectable(detector_id: str) -> bool:
+    return (detector_id in SELECTABLE_DETECTORS
+            or detector_id.startswith(ADDED_PREFIX))
 
 
 class DetectorChoice(BaseModel):
@@ -242,7 +254,7 @@ def _detector_config_response() -> DetectorConfigResponse:
         active_detector=active[0] if active else None,
         detectors=[
             DetectorChoice(**d) for d in list_detectors()
-            if d["id"] in SELECTABLE_DETECTORS
+            if _is_selectable(d["id"])
         ],
         env_override=bool(os.environ.get("ACTIVE_DETECTOR")),
     )
@@ -257,7 +269,7 @@ def get_detector_config() -> DetectorConfigResponse:
 def update_detector_config(
         req: DetectorConfigUpdateRequest) -> DetectorConfigResponse:
     detector_id = req.active_detector
-    if detector_id is not None and detector_id not in SELECTABLE_DETECTORS:
+    if detector_id is not None and not _is_selectable(detector_id):
         raise HTTPException(status_code=400,
                             detail=f"Unknown detector '{detector_id}'")
     try:
@@ -271,6 +283,44 @@ def update_detector_config(
         _session = _new_session()
 
     return _detector_config_response()
+
+
+class AddSourceRequest(BaseModel):
+    name: str
+    # Address of a running Detector API Wrapper, e.g. http://localhost:8002
+    url: str
+
+
+class AddSourceResponse(BaseModel):
+    added: DetectorChoice
+    config: DetectorConfigResponse
+
+
+@app.post("/admin/sources", response_model=AddSourceResponse)
+def add_source(req: AddSourceRequest) -> AddSourceResponse:
+    try:
+        entry = register_wrapper(req.name, req.url)
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AddSourceResponse(
+        added=DetectorChoice(id=entry["id"],
+                             name=entry["name"],
+                             status=entry["status"],
+                             is_llm_based=entry["is_llm_based"]),
+        config=_detector_config_response())
+
+
+@app.get("/admin/wrapper-template")
+def download_wrapper_template() -> FileResponse:
+    if not WRAPPER_TEMPLATE_PATH.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The API wrapper template isn't on this server yet. Ask "
+            "whoever runs it to add downloads/"
+            "detector-api-wrapper-template.zip.")
+    return FileResponse(WRAPPER_TEMPLATE_PATH,
+                        media_type="application/zip",
+                        filename=WRAPPER_TEMPLATE_PATH.name)
 
 
 @app.get("/", include_in_schema=False)
