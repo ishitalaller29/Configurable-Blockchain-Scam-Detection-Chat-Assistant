@@ -350,6 +350,9 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
+    # The user's expertise tier and use case as last worked out, so the page can match its jargon help to the tier.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
     # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
     raw_data: Optional[Dict] = None
 
@@ -397,6 +400,9 @@ class ChatSession:
         # Whether the assistant has already asked the user for their
         # blockchain familiarity and intended use.
         self._awaiting_profile_clarification = False
+        # Last expertise tier and use case the Business Analyser worked out. It may leave them null on a later turn, but the user's level hasn't changed, so keep applying the last known values.
+        self.expertise_tier: Optional[str] = None
+        self.use_case: Optional[str] = None
         # Live status for the chat's thinking bubble. The server swaps in a function that stores the text. It is a no-op everywhere else.
         self.on_status: Callable[[str], None] = lambda message: None
         # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
@@ -510,6 +516,10 @@ class ChatSession:
 
         self._status("Reading your message")
         ba_output = self.ba.analyse(self._send_window())
+        if ba_output.expertise_tier:
+            self.expertise_tier = ba_output.expertise_tier
+        if ba_output.use_case:
+            self.use_case = ba_output.use_case
 
         if ba_output.needs_clarification:
             if self._awaiting_profile_clarification:
@@ -532,6 +542,8 @@ class ChatSession:
                 reply=reply,
                 ba_output=ba_output,
                 quick_replies=quick_replies,
+                expertise_tier=self.expertise_tier,
+                use_case=self.use_case,
             )
 
         self._awaiting_profile_clarification = False
@@ -582,8 +594,13 @@ class ChatSession:
                     questions = _fallback_questions(context)
                 else:
                     self._status("Analysing the evidence")
-                    detection_result, questions = self.sc.check(context, notes)
+                    detection_result, questions = self.sc.check(
+                        context,
+                        notes,
+                        expertise_tier=self.expertise_tier,
+                        use_case=self.use_case)
                     print(">>> SCAM CHECKER RAN", flush=True)
+
                     detection_source = SOURCE_SCAM_CHECKER
                     # 3-agent pipeline: BA -> Scam Checker -> Forensic
                     # Investigator. Falls back to the Scam Checker's own
@@ -591,8 +608,8 @@ class ChatSession:
                     self._status("Writing the explanation")
                     detection_result = self.fi.explain(
                         detection_result, context,
-                        expertise_tier=ba_output.expertise_tier,
-                        use_case=ba_output.use_case)
+                        expertise_tier=self.expertise_tier,
+                        use_case=self.use_case)
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
@@ -634,6 +651,8 @@ class ChatSession:
                           detector_name=detector_name,
                           missing_fields=list(missing),
                           clarifying_questions=questions,
+                          expertise_tier=self.expertise_tier,
+                          use_case=self.use_case,
                           raw_data=build_raw_data(ba_output,
                                                   self._turn_context,
                                                   self._turn_detector_reply,

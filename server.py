@@ -100,6 +100,9 @@ class ChatResponse(BaseModel):
     clarifying_questions: List[str] = []
     # Optional quick-reply buttons displayed beneath the assistant response.
     quick_replies: List[str] = []
+    # The user's expertise tier and use case as last worked out, null until known. The page uses the tier to decide how many jargon definitions to show.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
     # The raw identifiers the data sources returned for this reply (see raw_data.py): {chain, queried_address, sources, items: [{type, value, field, source}]}. Null when the message wasn't about an address. type is transaction_hash, contract_address, wallet_address, account_address, address or block_hash.
     raw_data: Optional[dict] = None
 
@@ -131,6 +134,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
+        expertise_tier=turn.expertise_tier,
+        use_case=turn.use_case,
         raw_data=turn.raw_data,
     )
 
