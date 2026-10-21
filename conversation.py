@@ -9,7 +9,8 @@ from agents.scam_checker import ScamChecker
 from config_loader import get_active_detector
 from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
                                 run_detector)
-from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
+from fetchers.context_builder import (FETCHERS, STATUS_FAILED, citations,
+                                      missing_fields)
 from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
@@ -350,6 +351,8 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
+    # The data sources a verdict drew on ({"name", "url"}), for the citation pills.
+    citations: List[Dict[str, Optional[str]]] = field(default_factory=list)
     # The user's expertise tier and use case as last worked out, so the page can match its jargon help to the tier.
     expertise_tier: Optional[str] = None
     use_case: Optional[str] = None
@@ -550,6 +553,7 @@ class ChatSession:
 
         detection_result = None
         detection_source = None
+        cited: List[Dict[str, Optional[str]]] = []
         detector_name = None
         missing: Dict[str, str] = {}
         questions: List[str] = []
@@ -602,6 +606,8 @@ class ChatSession:
                     print(">>> SCAM CHECKER RAN", flush=True)
 
                     detection_source = SOURCE_SCAM_CHECKER
+                    # Only a reply that carries a verdict cites its sources.
+                    cited = citations(context)
                     # 3-agent pipeline: BA -> Scam Checker -> Forensic
                     # Investigator. Falls back to the Scam Checker's own
                     # explanation if the investigator fails.
@@ -651,6 +657,7 @@ class ChatSession:
                           detector_name=detector_name,
                           missing_fields=list(missing),
                           clarifying_questions=questions,
+                          citations=cited,
                           expertise_tier=self.expertise_tier,
                           use_case=self.use_case,
                           raw_data=build_raw_data(ba_output,

@@ -2,7 +2,7 @@ import copy
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from config_loader import ConfigError, get_cache_settings
 from fetchers.contract_fetcher import fetch_contract_info
@@ -23,6 +23,19 @@ FETCHERS = {
     "liquidity": ("liquidity_fetcher", fetch_liquidity),
 }
 NOTES = {"token_fetcher": ESTIMATE_NOTE}
+
+# The data source behind each fetcher, so a reply can cite the APIs it actually drew on. Keep in step with the imports above.
+FETCHER_SOURCES = {
+    "contract_fetcher": "Etherscan",
+    "tx_history_fetcher": "Etherscan",
+    "token_fetcher": "Etherscan",
+    "liquidity_fetcher": "DexScreener",
+}
+# Where a reader can see the same data themselves. Etherscan is Ethereum only, so other chains get no link.
+SOURCE_LINKS = {
+    "Etherscan": "https://etherscan.io/address/{address}",
+    "DexScreener": "https://dexscreener.com/{chain}/{address}",
+}
 
 # What the chat shows while each fetcher runs (live status text).
 PROGRESS_TEXT = {
@@ -136,3 +149,23 @@ def missing_fields(context: AddressContext) -> Dict[str, str]:
         if entry.get("status", STATUS_OK) != STATUS_OK
         for field in entry.get("fields", [])
     }
+
+
+def citations(context: AddressContext) -> List[Dict[str, Optional[str]]]:
+    # The sources that actually supplied data for this context, in fetch order, without repeats. A fetcher that failed or has no data source yet is left out, so a pill never claims a source that wasn't read.
+    names = []
+    for fetcher_id, entry in context.fetcher_provenance.items():
+        if entry.get("status", STATUS_OK) != STATUS_OK:
+            continue
+        name = FETCHER_SOURCES.get(fetcher_id)
+        if name and name not in names:
+            names.append(name)
+    chain = (context.chain or "").lower()
+    result = []
+    for name in names:
+        link = None
+        if name != "Etherscan" or chain == "ethereum":
+            link = SOURCE_LINKS[name].format(chain=chain,
+                                             address=context.address)
+        result.append({"name": name, "url": link})
+    return result

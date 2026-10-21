@@ -83,6 +83,12 @@ class Evidence(BaseModel):
     weight: float
 
 
+class Citation(BaseModel):
+    # A data source a verdict drew on. url is where the reader can see the same data, or None when there is no page for it.
+    name: str
+    url: Optional[str] = None
+
+
 class ChatResponse(BaseModel):
     # The text the CLI prints.
     reply: str
@@ -100,6 +106,8 @@ class ChatResponse(BaseModel):
     clarifying_questions: List[str] = []
     # Optional quick-reply buttons displayed beneath the assistant response.
     quick_replies: List[str] = []
+    # Data sources behind the verdict (Etherscan, DexScreener), shown as citation pills. Empty when the reply carries no verdict.
+    citations: List[Citation] = []
     # The user's expertise tier and use case as last worked out, null until known. The page uses the tier to decide how many jargon definitions to show.
     expertise_tier: Optional[str] = None
     use_case: Optional[str] = None
@@ -134,6 +142,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
+        citations=[Citation(**c) for c in turn.citations],
         expertise_tier=turn.expertise_tier,
         use_case=turn.use_case,
         raw_data=turn.raw_data,

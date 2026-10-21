@@ -440,7 +440,134 @@ document.addEventListener('DOMContentLoaded', () => {
     liquidity: 'liquidity pool data',
   };
 
-  function evidenceList(evidence) {
+  // ---------- Jargon definitions (hover tips) ----------
+  // Plain-language definitions for blockchain terms that appear in replies. Each entry lists the spellings to match. Matching ignores case, and only the first use of a term in a message is bolded, so a reply isn't covered in highlights.
+  const GLOSSARY = [
+    { forms: ['liquidity pools', 'liquidity pool'], definition: 'A shared pot of two tokens that lets people trade one for the other. If it is small, or one person can empty it, trading can be risky.' },
+    { forms: ['liquidity'], definition: 'How easily a token can be bought or sold without moving its price. Low liquidity can make it hard to sell.' },
+    { forms: ['rug pulls', 'rug pull'], definition: 'A scam where the creators take the money out of a project and leave buyers holding worthless tokens.' },
+    { forms: ['honeypots', 'honeypot'], definition: 'A token that can be bought but not sold, so buyers are trapped.' },
+    { forms: ['pump and dump'], definition: 'A scheme that drives a price up with hype, then sells at the top, leaving later buyers with losses.' },
+    { forms: ['smart contracts', 'smart contract'], definition: 'A program stored on the blockchain that runs by itself when its conditions are met.' },
+    { forms: ['blockchain'], definition: 'A shared public record of transactions that no single person controls and that cannot easily be changed.' },
+    { forms: ['wallets', 'wallet'], definition: 'An account on the blockchain that holds tokens. It is identified by a long code called an address.' },
+    { forms: ['transaction history'], definition: 'The list of past transfers in and out of an address, with dates and amounts.' },
+    { forms: ['on-chain'], definition: 'Recorded on the blockchain itself, where anyone can check it.' },
+    { forms: ['minting', 'mint'], definition: 'Creating new tokens. If the owner can mint without limit, they can dilute everyone else.' },
+    { forms: ['verified source code'], definition: 'The contract\'s code has been published and matched to what runs on the blockchain, so people can read what it does.' },
+    { forms: ['DEX', 'decentralized exchange'], definition: 'A trading site that runs on smart contracts instead of a company, such as Uniswap.' },
+    { forms: ['ERC-20'], definition: 'The standard format most tokens on Ethereum follow, so wallets and exchanges can handle them.' },
+    { forms: ['wash trading'], definition: 'Trading with yourself to fake activity and make a token look popular.' },
+    { forms: ['phishing'], definition: 'Tricking people into giving up passwords, keys or approvals, often with a fake site or message.' },
+  ];
+
+  const GLOSSARY_LOOKUP = {};
+  GLOSSARY.forEach(entry => {
+    entry.forms.forEach(form => { GLOSSARY_LOOKUP[form.toLowerCase()] = entry; });
+  });
+  const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Longest spellings first, so "liquidity pool" wins over "liquidity".
+  const GLOSSARY_REGEX = new RegExp(
+    '(?<![\\w-])(' +
+    Object.keys(GLOSSARY_LOOKUP)
+      .sort((a, b) => b.length - a.length)
+      .map(escapeRegex)
+      .join('|') +
+    ')(?![\\w-])',
+    'gi'
+  );
+
+  // Fills `el` with `text`, turning the first use of each defined term into a bold, hoverable term. Built from text nodes, never innerHTML, so a reply is still shown literally. `seen` is a Map of the terms already marked in this message (glossary entry -> the wording used).
+  function renderWithTerms(el, text, seen) {
+    el.textContent = '';
+    let last = 0;
+    GLOSSARY_REGEX.lastIndex = 0;
+    let match;
+    while ((match = GLOSSARY_REGEX.exec(text)) !== null) {
+      const entry = GLOSSARY_LOOKUP[match[1].toLowerCase()];
+      if (seen.has(entry)) continue;
+      seen.set(entry, match[1]);
+      if (match.index > last) {
+        el.appendChild(document.createTextNode(text.slice(last, match.index)));
+      }
+      const term = document.createElement('span');
+      term.className = 'term';
+      term.tabIndex = 0;
+      term.appendChild(document.createTextNode(match[1]));
+      const tip = document.createElement('span');
+      tip.className = 'term-tooltip';
+      tip.setAttribute('role', 'tooltip');
+      tip.textContent = entry.definition;
+      term.appendChild(tip);
+      el.appendChild(term);
+      last = match.index + match[1].length;
+    }
+    if (last < text.length) {
+      el.appendChild(document.createTextNode(text.slice(last)));
+    }
+  }
+
+  // ---------- Citation pills ----------
+  // One pill per data source the verdict drew on, then a separate pill for the glossary when the reply defined any terms. Called last, so the pills sit at the end of the message.
+  function citationRow(citations, usedTerms) {
+    const row = document.createElement('div');
+    row.className = 'citation-row';
+    citations.forEach(c => {
+      if (!c || !c.name) return;
+      const pill = document.createElement(c.url ? 'a' : 'span');
+      pill.className = 'citation-pill';
+      pill.textContent = c.name;
+      if (c.url) {
+        pill.href = c.url;
+        pill.target = '_blank';
+        pill.rel = 'noopener noreferrer';
+        pill.title = 'Open ' + c.name + ' in a new tab';
+        const icon = document.createElement('span');
+        icon.className = 'citation-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '↗';
+        pill.appendChild(icon);
+      }
+      row.appendChild(pill);
+    });
+    if (usedTerms.size > 0) {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'citation-pill citation-pill-glossary';
+      pill.setAttribute('aria-expanded', 'false');
+      pill.title = 'Show the definitions used in this reply';
+      pill.textContent = 'Definitions: ChainCheck glossary';
+      const arrow = document.createElement('span');
+      arrow.className = 'citation-icon';
+      arrow.setAttribute('aria-hidden', 'true');
+      arrow.textContent = '\u25BE';
+      pill.appendChild(arrow);
+
+      // Clicking the pill opens the list of every term defined in this reply.
+      const panel = document.createElement('dl');
+      panel.className = 'glossary-panel';
+      panel.hidden = true;
+      usedTerms.forEach((wording, entry) => {
+        const dt = document.createElement('dt');
+        dt.textContent = wording;
+        const dd = document.createElement('dd');
+        dd.textContent = entry.definition;
+        panel.append(dt, dd);
+      });
+      pill.addEventListener('click', () => {
+        const open = panel.hidden;
+        panel.hidden = !open;
+        pill.setAttribute('aria-expanded', String(open));
+        arrow.textContent = open ? '\u25B4' : '\u25BE';
+        thread.scrollTop = thread.scrollHeight;
+      });
+      row.appendChild(pill);
+      row.appendChild(panel);
+    }
+    return row.childElementCount ? row : null;
+  }
+
+  function evidenceList(evidence, seen) {
     const box = document.createElement('div');
     box.className = 'evidence-box';
     const heading = document.createElement('p');
@@ -452,7 +579,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Strongest evidence first - the backend returns it in no particular order.
     [...evidence].sort((a, b) => b.weight - a.weight).forEach(item => {
       const li = document.createElement('li');
-      li.textContent = item.description;
+      const desc = document.createElement('span');
+      renderWithTerms(desc, item.description, seen);
+      li.appendChild(desc);
       const weight = document.createElement('span');
       weight.className = 'evidence-weight';
       weight.textContent = item.weight.toFixed(2);
@@ -489,6 +618,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function appendReply(data) {
     const div = appendAiMsg(data.reply);
     const textEl = div.querySelector('.msg-ai-text');
+    // Terms already marked in this message, so each is bolded once.
+    const usedTerms = new Map();
+    renderWithTerms(textEl, data.reply, usedTerms);
 
     const tag = STATUS_TAGS[data.label];
     if (tag) {
@@ -501,7 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const hasEvidence = Array.isArray(data.evidence) && data.evidence.length > 0;
 
     if (hasEvidence) {
-      div.appendChild(evidenceList(data.evidence));
+      div.appendChild(evidenceList(data.evidence, usedTerms));
     } else if (data.label === 'insufficient_evidence') {
       const note = document.createElement('p');
       note.className = 'interpretation-note';
@@ -540,6 +672,11 @@ document.addEventListener('DOMContentLoaded', () => {
         data.missing_fields.map(f => MISSING_FIELD_WORDS[f] || f).join(', ');
       div.appendChild(note);
     }
+
+    // Pills close the message: a verdict names its data sources, and any defined term gets the glossary pill beside them.
+    const citations = tag && Array.isArray(data.citations) ? data.citations : [];
+    const pills = citationRow(citations, usedTerms);
+    if (pills) div.appendChild(pills);
 
     if (Array.isArray(data.quick_replies) && data.quick_replies.length > 0) {
       const quickReplies = document.createElement('div');
@@ -658,7 +795,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
 
-  document.addEventListener('mouseover', (e) => {
+  function showTermTip(e) {
     const term = e.target.closest('.term');
     if (!term) return;
     const tooltip = term.querySelector('.term-tooltip');
@@ -677,11 +814,16 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       tooltip.style.top = (rect.top - tooltipRect.height - 8) + 'px';
     }
-  });
-  document.addEventListener('mouseout', (e) => {
+  }
+  function hideTermTip(e) {
     const term = e.target.closest('.term');
     if (!term) return;
     const tooltip = term.querySelector('.term-tooltip');
     if (tooltip) tooltip.classList.remove('visible');
-  });
+  }
+  document.addEventListener('mouseover', showTermTip);
+  document.addEventListener('mouseout', hideTermTip);
+  // Keyboard users get the same tip when a term takes focus.
+  document.addEventListener('focusin', showTermTip);
+  document.addEventListener('focusout', hideTermTip);
 });
