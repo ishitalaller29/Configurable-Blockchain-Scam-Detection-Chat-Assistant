@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fetchers.context_builder import FETCHERS, build_address_context
 from fetchers.tx_hash_resolver_fetcher import resolve_tx_hash
@@ -20,9 +20,12 @@ def resolve_address(raw_input: RawInput, chain: str) -> str:
 
 def get_address_context(
         ba_output: BusinessAnalyserOutput,
-        requested_fields: Optional[List[str]] = None) -> AddressContext:
+        requested_fields: Optional[List[str]] = None,
+        progress: Optional[Callable[[str], None]] = None) -> AddressContext:
     chain = ba_output.chain or "ethereum"
+    if progress is not None and ba_output.raw_input.type == "tx_hash":
+        progress("Looking up the transaction on Etherscan")
     address = resolve_address(ba_output.raw_input, chain)
     fields = [f for f in requested_fields
               if f in FETCHERS] if requested_fields else None
-    return build_address_context(chain, address, fields)
+    return build_address_context(chain, address, fields, progress)

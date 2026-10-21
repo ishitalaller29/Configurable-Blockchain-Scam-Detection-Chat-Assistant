@@ -6,11 +6,29 @@ document.addEventListener('DOMContentLoaded', () => {
   const thread = document.getElementById('thread');
   const promptHint = document.getElementById('promptHint');
   const plusIcon = document.getElementById('plusIcon');
-  const adminToggle = document.getElementById('adminToggle');
+  const adminBtn = document.getElementById('adminBtn');
+  const adminBtnLabel = document.getElementById('adminBtnLabel');
+  const adminDialog = document.getElementById('adminDialog');
+  const adminForm = document.getElementById('adminForm');
+  const adminPass = document.getElementById('adminPass');
+  const adminError = document.getElementById('adminError');
+  const adminCancel = document.getElementById('adminCancel');
+  const attachNote = document.getElementById('attachNote');
   const sidebar = document.getElementById('sidebar');
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
-  const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
+  const llmConfigRows = document.getElementById('llmConfigRows');
+  const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
+  const llmConfigStatus = document.getElementById('llmConfigStatus');
+  const addSourceForm = document.getElementById('addSourceForm');
+  const sourceNameInput = document.getElementById('sourceNameInput');
+  const sourceUrlInput = document.getElementById('sourceUrlInput');
+  const sourceCancelBtn = document.getElementById('sourceCancelBtn');
+  const addSourceStatus = document.getElementById('addSourceStatus');
+  const downloadStatus = document.getElementById('downloadStatus');
+  const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
+  const detectorSelect = document.getElementById('detectorSelect');
+  const detectorStatus = document.getElementById('detectorStatus');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -20,22 +38,20 @@ document.addEventListener('DOMContentLoaded', () => {
     ? 'http://localhost:8000'
     : '';
   const CHAT_API_URL = API_BASE + '/chat';
+  const CHAT_STATUS_URL = API_BASE + '/chat/status';
   const RESET_API_URL = API_BASE + '/session/reset';
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
-
-  adminToggle.addEventListener('change', () => {
-    sidebar.style.display = adminToggle.checked ? 'block' : 'none';
-  });
 
   backToStart.addEventListener('click', () => {
     window.location.href = '../starting-page/index.html';
   });
 
+  // File attachments are not supported by the backend yet, so say so instead of faking an attachment.
   plusIcon.addEventListener('click', () => {
-    const chip = cloneTemplate(fileChipTemplate);
-    const inputRow = document.querySelector('.input-row');
-    inputRow.parentNode.insertBefore(chip, inputRow);
+    attachNote.hidden = false;
+    clearTimeout(plusIcon._noteTimer);
+    plusIcon._noteTimer = setTimeout(() => { attachNote.hidden = true; }, 4000);
   });
 
   // ---------- Connected sources (admin sidebar) ----------
@@ -46,19 +62,342 @@ document.addEventListener('DOMContentLoaded', () => {
     item.classList.add('active');
   });
 
-  addSourceBtn.addEventListener('click', () => {
-    const name = (window.prompt('Name of the source to add') || '').trim();
-    if (!name) return;
+  // ---------- Add source ----------
+  // "+ add source" opens a small form for the address of a running Detector API Wrapper (the container built from the downloadable template). The server checks that the wrapper is up and has a detector set up, then lists it under Active Detector below.
+  const SOURCES_URL = API_BASE + '/admin/sources';
+  const TEMPLATE_URL = API_BASE + '/admin/wrapper-template';
+
+  // Error replies carry a readable `detail`; fall back to a generic line if there isn't one.
+  async function errorDetail(res, fallback) {
+    try {
+      const body = await res.json();
+      if (body && typeof body.detail === 'string') return body.detail;
+    } catch (err) { /* not JSON */ }
+    return fallback;
+  }
+
+  function addSourceItem(id, name) {
+    if (!addSourceBtn || !addSourceBtn.parentNode) return;
+    const exists = Array.from(sidebar.querySelectorAll('.source-item'))
+      .some(el => el.dataset.source === id);
+    if (exists) return;
     const item = document.createElement('div');
     item.className = 'source-item';
     item.tabIndex = 0;
-    item.dataset.source = name;
-    item.textContent = name;
+    item.dataset.source = id;
+    item.appendChild(document.createTextNode(name || id));
     const dot = document.createElement('span');
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+  }
+
+  function setAddSourceOpen(open) {
+    if (!addSourceForm) return;
+    addSourceForm.style.display = open ? 'block' : 'none';
+    if (open && sourceNameInput) sourceNameInput.focus();
+    if (!open && addSourceStatus) addSourceStatus.textContent = '';
+  }
+
+  if (!addSourceBtn || !addSourceForm) {
+    console.warn('Add source controls are missing from the page.');
+  } else {
+    addSourceBtn.addEventListener('click', () => {
+      setAddSourceOpen(addSourceForm.style.display === 'none');
+    });
+
+    if (sourceCancelBtn) {
+      sourceCancelBtn.addEventListener('click', () => setAddSourceOpen(false));
+    }
+
+    addSourceForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = sourceNameInput ? sourceNameInput.value.trim() : '';
+      const url = sourceUrlInput ? sourceUrlInput.value.trim() : '';
+      if (!name || !url) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Enter a name and the wrapper address.';
+        return;
+      }
+      if (addSourceStatus) addSourceStatus.textContent = 'Checking the wrapper…';
+      try {
+        const res = await fetch(SOURCES_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, url }),
+        });
+        if (!res.ok) {
+          if (addSourceStatus) addSourceStatus.textContent = await errorDetail(res, 'Could not add the source.');
+          return;
+        }
+        const data = await res.json();
+        addSourceItem(data.added.id, data.added.name);
+        renderDetectorConfig(data.config);
+        if (sourceNameInput) sourceNameInput.value = '';
+        if (sourceUrlInput) sourceUrlInput.value = '';
+        setAddSourceOpen(false);
+        if (detectorStatus) detectorStatus.textContent = `Added "${data.added.name}". Choose it here to use it.`;
+      } catch (err) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
+
+  // Downloads the wrapper's Docker setup (Dockerfile, docker-compose.yml, .env.example and source) as a ZIP. The steps under the button say how to run it.
+  if (!downloadTemplateBtn) {
+    console.warn('Download template button is missing from the page.');
+  } else {
+    downloadTemplateBtn.addEventListener('click', async () => {
+      if (downloadStatus) downloadStatus.textContent = 'Preparing the download…';
+      try {
+        const res = await fetch(TEMPLATE_URL);
+        if (!res.ok) {
+          if (downloadStatus) downloadStatus.textContent = await errorDetail(res, 'The template could not be downloaded.');
+          return;
+        }
+        const blob = await res.blob();
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'detector-api-wrapper-template.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        if (downloadStatus) downloadStatus.textContent = 'Downloaded. Follow the steps below to run it.';
+      } catch (err) {
+        if (downloadStatus) downloadStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
+
+  // ---------- Admin password gate ----------
+  // Hardcoded shared passphrase per the client's own suggestion (confirmed
+  // in the technical advisor meeting as the simplest acceptable approach -
+  // real auth/accounts are explicitly out of scope for this project).
+  const ADMIN_PASSPHRASE = 'admin';
+
+  let adminOn = false;
+
+  function setAdmin(on) {
+    adminOn = on;
+    sidebar.style.display = on ? 'block' : 'none';
+    adminBtn.classList.toggle('active', on);
+    adminBtn.setAttribute('aria-pressed', String(on));
+    adminBtnLabel.textContent = on ? 'Admin (exit)' : 'Admin';
+    if (on) {
+      loadLlmConfig();
+      loadDetectorConfig();
+    }
+  }
+
+  function closeAdminDialog() {
+    adminDialog.hidden = true;
+    adminPass.value = '';
+    adminError.hidden = true;
+    adminBtn.focus();
+  }
+
+  adminBtn.addEventListener('click', () => {
+    if (adminOn) {
+      setAdmin(false);
+      return;
+    }
+    adminDialog.hidden = false;
+    adminPass.focus();
   });
+
+  adminForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (adminPass.value === ADMIN_PASSPHRASE) {
+      closeAdminDialog();
+      setAdmin(true);
+    } else {
+      adminError.hidden = false;
+      adminPass.select();
+    }
+  });
+
+  adminCancel.addEventListener('click', closeAdminDialog);
+  adminDialog.addEventListener('click', (e) => {
+    if (e.target === adminDialog) closeAdminDialog();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !adminDialog.hidden) closeAdminDialog();
+  });
+
+  // ---------- LLM Backend config (FR-14) ----------
+  const AGENT_LABELS = {
+    business_analyser: 'Business Analyser',
+    scam_checker: 'Scam Checker',
+    forensic_investigator: 'Forensic Investigator',
+  };
+
+  const LLM_CONFIG_URL = API_BASE + '/admin/llm-config';
+  let llmConfigState = null;
+
+  function renderLlmConfig(data) {
+    llmConfigState = data;
+    llmConfigRows.innerHTML = '';
+
+    Object.keys(AGENT_LABELS).forEach(agentKey => {
+      const agentConfig = data.config[agentKey];
+      if (!agentConfig) return;
+
+      const row = document.createElement('div');
+      row.className = 'llm-agent-row';
+      row.dataset.agent = agentKey;
+
+      const label = document.createElement('p');
+      label.className = 'llm-agent-label';
+      label.textContent = AGENT_LABELS[agentKey];
+      row.appendChild(label);
+
+      const select = document.createElement('select');
+      select.className = 'llm-provider-select';
+      data.supported_providers.forEach(provider => {
+        const opt = document.createElement('option');
+        opt.value = provider;
+        opt.textContent = provider;
+        if (provider === agentConfig.provider) opt.selected = true;
+        select.appendChild(opt);
+      });
+      row.appendChild(select);
+
+      const modelInput = document.createElement('input');
+      modelInput.type = 'text';
+      modelInput.className = 'llm-model-input';
+      modelInput.placeholder = 'Model name';
+      modelInput.value = agentConfig.model || '';
+      row.appendChild(modelInput);
+
+      const note = document.createElement('p');
+      note.className = 'llm-provider-note';
+      const isFunctional = data.functional_providers.includes(agentConfig.provider);
+      note.textContent = isFunctional
+        ? ''
+        : 'Selected, but not yet functional - wired up in Sprint 3.';
+      note.style.display = isFunctional ? 'none' : 'block';
+      row.appendChild(note);
+
+      select.addEventListener('change', () => {
+        const functional = data.functional_providers.includes(select.value);
+        note.textContent = functional
+          ? ''
+          : 'Selected, but not yet functional - wired up in Sprint 3.';
+        note.style.display = functional ? 'none' : 'block';
+      });
+
+      llmConfigRows.appendChild(row);
+    });
+  }
+
+  async function loadLlmConfig() {
+    try {
+      const res = await fetch(LLM_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = '';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Could not load LLM config from the server.';
+    }
+  }
+
+  saveLlmConfigBtn.addEventListener('click', async () => {
+    if (!llmConfigState) return;
+    const config = {};
+    llmConfigRows.querySelectorAll('.llm-agent-row').forEach(row => {
+      const agentKey = row.dataset.agent;
+      const provider = row.querySelector('.llm-provider-select').value;
+      const model = row.querySelector('.llm-model-input').value.trim();
+      const existing = llmConfigState.config[agentKey] || {};
+      config[agentKey] = {
+        provider,
+        model,
+        base_url: existing.base_url || null,
+        api_key: existing.api_key || null,
+      };
+    });
+
+    llmConfigStatus.textContent = 'Saving…';
+    try {
+      const res = await fetch(LLM_CONFIG_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config }),
+      });
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      renderLlmConfig(data);
+      llmConfigStatus.textContent = 'Saved.';
+    } catch (err) {
+      llmConfigStatus.textContent = 'Failed to save LLM config.';
+    }
+  });
+
+  // ---------- Active detector ----------
+  // Picks which detector answers scam checks. "None" sends them to the ScamChecker. Saving starts a fresh conversation on the server, so the thread is cleared to match.
+  const DETECTOR_CONFIG_URL = API_BASE + '/admin/detector';
+  const NO_DETECTOR = '';
+
+  function renderDetectorConfig(data) {
+    if (!detectorSelect) return;
+    detectorSelect.innerHTML = '';
+
+    const none = document.createElement('option');
+    none.value = NO_DETECTOR;
+    none.textContent = 'None (Scam Checker)';
+    detectorSelect.appendChild(none);
+
+    data.detectors.forEach(detector => {
+      // Wrappers added earlier show under Connected sources too.
+      if (detector.id.startsWith('wrapper_')) addSourceItem(detector.id, detector.name);
+      const opt = document.createElement('option');
+      opt.value = detector.id;
+      opt.textContent = detector.name || detector.id;
+      if (detector.status !== 'live') opt.textContent += ' (may be unavailable)';
+      detectorSelect.appendChild(opt);
+    });
+    detectorSelect.value = data.active_detector || NO_DETECTOR;
+    detectorSelect.disabled = data.env_override;
+    if (detectorStatus) {
+      detectorStatus.textContent = data.env_override
+        ? 'Set by ACTIVE_DETECTOR on the server - unset it to choose here.'
+        : '';
+    }
+  }
+
+  async function loadDetectorConfig() {
+    try {
+      const res = await fetch(DETECTOR_CONFIG_URL);
+      if (!res.ok) throw new Error('bad status');
+      renderDetectorConfig(await res.json());
+    } catch (err) {
+      if (detectorStatus) detectorStatus.textContent = 'Could not load detectors from the server.';
+    }
+  }
+
+  if (detectorSelect) {
+    detectorSelect.addEventListener('change', async () => {
+      const chosen = detectorSelect.value;
+      if (detectorStatus) detectorStatus.textContent = 'Saving…';
+      try {
+        const res = await fetch(DETECTOR_CONFIG_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active_detector: chosen === NO_DETECTOR ? null : chosen }),
+        });
+        if (!res.ok) throw new Error('bad status');
+        renderDetectorConfig(await res.json());
+        thread.innerHTML = '';
+        thread.appendChild(promptHint);
+        promptHint.style.display = '';
+        if (detectorStatus) detectorStatus.textContent = 'Saved - new conversation started.';
+      } catch (err) {
+        if (detectorStatus) detectorStatus.textContent = 'Failed to change detector.';
+        loadDetectorConfig();
+      }
+    });
+  }
 
   function appendUserMsg(text) {
     const div = document.createElement('div');
@@ -229,6 +568,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function evidenceList(evidence, seen) {
+    const box = document.createElement('div');
+    box.className = 'evidence-box';
+    const heading = document.createElement('p');
+    heading.className = 'evidence-box-label';
+    heading.textContent = 'Evidence';
+    box.appendChild(heading);
     const ul = document.createElement('ul');
     ul.className = 'evidence-list';
     // Strongest evidence first - the backend returns it in no particular order.
@@ -243,7 +588,8 @@ document.addEventListener('DOMContentLoaded', () => {
       li.appendChild(weight);
       ul.appendChild(li);
     });
-    return ul;
+    box.appendChild(ul);
+    return box;
   }
 
   function detailBlock(rows) {
@@ -310,7 +656,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (data.risk_type) rows.push(['Risk type', data.risk_type]);
     if (data.source) {
-      rows.push(['Source', SOURCE_WORDS[data.source] || data.source]);
+      let source = SOURCE_WORDS[data.source] || data.source;
+      if (data.source === 'detector' && data.detector_name) {
+        source += ' (' + data.detector_name + ')';
+      }
+      rows.push(['Source', source]);
     }
     if (rows.length) div.appendChild(detailBlock(rows));
 
@@ -356,6 +706,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return appendAiMsg('Thinking…', 'msg-pending');
   }
 
+  // While the answer is being worked out, ask the server what it is doing and show that in the pending bubble. Returns a function that stops the polling.
+  function startStatusPolling(pending) {
+    const label = pending.querySelector('.msg-ai-text');
+    let stopped = false;
+    let timer = null;
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch(CHAT_STATUS_URL);
+        if (res.ok && !stopped) {
+          const data = await res.json();
+          if (data.status && label) label.textContent = data.status + '…';
+        }
+      } catch (err) {
+        // Status is cosmetic. The bubble keeps its last text.
+      }
+      if (!stopped) timer = setTimeout(poll, 400);
+    }
+
+    timer = setTimeout(poll, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
   function appendErrorMsg(title, text) {
     appendAiMsg(text, 'msg-error', title);
   }
@@ -374,14 +751,17 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInput.disabled = true;
     sending = true;
     const pending = appendPendingMsg();
+    let stopStatus = () => {};
 
     try {
       await sessionReady;
+      stopStatus = startStatusPolling(pending);
       const res = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
+      stopStatus();
       pending.remove();
 
       if (!res.ok) {
@@ -396,6 +776,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       appendReply(data);
     } catch (err) {
+      stopStatus();
       pending.remove();
       appendErrorMsg(
         'Connection issue',

@@ -2,7 +2,7 @@ import copy
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from config_loader import ConfigError, get_cache_settings
 from fetchers.contract_fetcher import fetch_contract_info
@@ -35,6 +35,14 @@ FETCHER_SOURCES = {
 SOURCE_LINKS = {
     "Etherscan": "https://etherscan.io/address/{address}",
     "DexScreener": "https://dexscreener.com/{chain}/{address}",
+}
+
+# What the chat shows while each fetcher runs (live status text).
+PROGRESS_TEXT = {
+    "contract": "Checking Etherscan for the contract details",
+    "tx_history": "Checking Etherscan for the transaction history",
+    "tokens": "Checking Etherscan for token balances",
+    "liquidity": "Checking the liquidity on DexScreener",
 }
 
 # fetcher_provenance status values
@@ -80,7 +88,8 @@ def clear_cache() -> None:
 def build_address_context(
         chain: str,
         address: str,
-        fields: Optional[Iterable[str]] = None) -> AddressContext:
+        fields: Optional[Iterable[str]] = None,
+        progress: Optional[Callable[[str], None]] = None) -> AddressContext:
     # Checked once here, not per fetcher, so a typo'd address is reported as a typo instead of as four identical fetcher failures.
     if not ADDRESS_RE.match(address):
         raise InvalidInputError(
@@ -95,6 +104,8 @@ def build_address_context(
 
     for field in wanted:
         fetcher_id, fn = FETCHERS[field]
+        if progress is not None:
+            progress(PROGRESS_TEXT.get(field, f"Checking {field}"))
         # Each fetcher fails on its own: a failure is recorded in provenance and the rest still run, so the agents get whatever partial context there is.
         try:
             value, fetched_at = _run_cached(chain, address, fetcher_id, fn)

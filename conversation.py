@@ -1,18 +1,26 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
+from agents.forensic_investigator import ForensicInvestigator
 from agents.scam_checker import ScamChecker
+from config_loader import get_active_detector
+from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
+                                run_detector)
 from fetchers.context_builder import (FETCHERS, STATUS_FAILED, citations,
                                       missing_fields)
-from fetchers.etherscan import InvalidInputError, UnsupportedChainError
-from fetchers.fetcher_output import get_address_context, is_supported
+from fetchers.etherscan import (ADDRESS_RE, InvalidInputError,
+                                UnsupportedChainError)
+from fetchers.fetcher_output import (get_address_context, is_supported,
+                                     resolve_address)
+from raw_data import build_raw_data
 from fetchers.tx_hash_resolver_fetcher import TxNotFoundError
 from fetchers.tx_history_fetcher import MAX_TXS
 from llm_providers.base import LLMProvider
 from schema import (AddressContext, BusinessAnalyserOutput, DetectionResult,
-                    RawInput)
+                    DetectorConfig, RawInput)
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +43,40 @@ SOURCE_WORDS = {
 }
 
 
+def describe_source(source: str, detector_name: Optional[str] = None) -> str:
+    words = SOURCE_WORDS.get(source, source)
+    if source == SOURCE_DETECTOR and detector_name:
+        return f"{words} ({detector_name})"
+    return words
+
+
 def summarize_detection(result: DetectionResult) -> str:
     return result.explanation
+
+
+_DETECTOR_VERDICT_WORDS = {
+    "scam": "flags this as a scam",
+    "not_scam": "doesn't flag this as a scam",
+    "insufficient_evidence": "couldn't reach a scam or not-scam verdict on this one",
+}
+_MAX_FINDINGS_NAMED = 3
+
+
+def _template_explanation(result: DetectionResult, detector_name: str) -> str:
+    reply = (f"{detector_name} {_DETECTOR_VERDICT_WORDS[result.label]} "
+             f"(confidence {round(result.confidence * 100)}%).")
+    if not result.evidence:
+        return reply + " It didn't give any supporting evidence for that."
+    strongest = sorted(result.evidence, key=lambda e: e.weight, reverse=True)
+    findings = "; ".join(
+        e.description.rstrip(". ") for e in strongest[:_MAX_FINDINGS_NAMED])
+    return reply + f" Its strongest findings: {findings}."
+
+
+def explain_detector_result(result: DetectionResult, detector_name: str,
+                            context: Optional[AddressContext]) -> DetectionResult:
+    return result.model_copy(
+        update={"explanation": _template_explanation(result, detector_name)})
 
 
 _CHAIN_NAMES = {
@@ -136,6 +176,15 @@ def _no_data_reply(context: AddressContext) -> str:
             f"checks on {context.address} just now, so I've got nothing "
             "on-chain to judge it by, and I'd rather not guess. Try asking "
             "again in a minute.")
+
+
+def _detector_failed_reply(outcome: DetectorOutcome) -> str:
+    reply = f"No verdict this time - {outcome.error}"
+    if outcome.error_kind in (ERROR_CONFIG, ERROR_REJECTED):
+        return reply + (" That's a problem with how the detector is set up, "
+                        "not a sign either way about this address.")
+    return reply + (" So I can't say either way yet - want to try again in "
+                    "a minute?")
 
 
 def _chain_name(chain: str) -> str:
@@ -295,6 +344,7 @@ class TurnResult:
     ba_output: BusinessAnalyserOutput
     detection_result: Optional[DetectionResult] = None
     detection_source: Optional[str] = None
+    detector_name: Optional[str] = None
     # Context fields that couldn't be checked this turn
     missing_fields: List[str] = field(default_factory=list)
     # Questions asked this turn because the evidence was insufficient
@@ -303,6 +353,11 @@ class TurnResult:
     quick_replies: List[str] = field(default_factory=list)
     # The data sources a verdict drew on ({"name", "url"}), for the citation pills.
     citations: List[Dict[str, Optional[str]]] = field(default_factory=list)
+    # The user's expertise tier and use case as last worked out, so the page can match its jargon help to the tier.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
+    # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
+    raw_data: Optional[Dict] = None
 
 
 class ChatSession:
@@ -312,9 +367,30 @@ class ChatSession:
                  temperature: float = 0.3,
                  max_tokens: int = 800,
                  max_history_messages: int = 500,
-                 send_window_messages: int = 20):
-        self.ba = BusinessAnalyser(provider, temperature, max_tokens)
-        self.sc = ScamChecker(provider, temperature, max_tokens)
+                 send_window_messages: int = 20,
+                 ba_provider: Optional[LLMProvider] = None,
+                 sc_provider: Optional[LLMProvider] = None):
+        # ba_provider/sc_provider let each agent run on its own configured
+        # LLM backend (FR-14). Both default to `provider` so every existing
+        # caller that passes just one provider keeps working unchanged.
+        self.detector: Optional[DetectorConfig] = None
+        detector_id = None
+        active = get_active_detector()
+        if active is not None:
+            detector_id, self.detector = active
+        self.ba = BusinessAnalyser(
+            ba_provider or provider,
+            temperature,
+            max_tokens,
+            selected_detector=detector_id,
+            detector_required_input=(self.detector.required_input_type
+                                     if self.detector else None))
+        
+        self.sc = ScamChecker(sc_provider or provider, temperature, max_tokens)
+        # Third agent: rewrites the verdict in plain language for this user.
+        # It never changes the label, confidence or evidence.
+
+        self.fi = ForensicInvestigator(provider, temperature, max_tokens)
         self.history: List[Dict[str, str]] = []
         # In-memory only - the last N messages (user + assistant turns combined), not persisted anywhere.
         self.max_history_messages = max_history_messages
@@ -327,6 +403,15 @@ class ChatSession:
         # Whether the assistant has already asked the user for their
         # blockchain familiarity and intended use.
         self._awaiting_profile_clarification = False
+        # Last expertise tier and use case the Business Analyser worked out. It may leave them null on a later turn, but the user's level hasn't changed, so keep applying the last known values.
+        self.expertise_tier: Optional[str] = None
+        self.use_case: Optional[str] = None
+        # Live status for the chat's thinking bubble. The server swaps in a function that stores the text. It is a no-op everywhere else.
+        self.on_status: Callable[[str], None] = lambda message: None
+        # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
+        self._turn_context: Optional[AddressContext] = None
+        self._turn_detector_reply: Optional[Tuple[str, Any]] = None
+        self._turn_address: Optional[str] = None
 
     def _remember(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content})
@@ -338,6 +423,12 @@ class ChatSession:
         if window and window[0]["role"] == "assistant":
             window = window[1:]
         return window
+
+    def _status(self, message: str) -> None:
+        try:
+            self.on_status(message)
+        except Exception:
+            logger.debug("status callback failed", exc_info=True)
 
     def handle_message(self, user_text: str) -> TurnResult:
         self._remember("user", user_text)
@@ -355,34 +446,91 @@ class ChatSession:
         # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
         chain = ba_output.chain or "ethereum"
         try:
-            return get_address_context(ba_output, requested_fields), None
+            context = get_address_context(ba_output, requested_fields,
+                                          self._status)
+            self._turn_context = context
+            return context, None
+        
         except Exception as e:
             logger.warning("lookup for %s failed: %s", ba_output.raw_input,
                            type(e).__name__)
             return None, _lookup_error_reply(e, chain)
 
+    def _detector_check(
+        self, ba_output: BusinessAnalyserOutput
+    ) -> Tuple[str, Optional[DetectionResult], Dict[str, str]]:
+        config = self.detector
+        chain = ba_output.chain or "ethereum"
+        context: Optional[AddressContext] = None
+        missing: Dict[str, str] = {}
+
+        if ba_output.required_input_type == "address_with_context":
+            context, reply = self._fetch_context(ba_output)
+            if context is None:
+                return reply, None, missing
+            missing = missing_fields(context)
+            address = context.address
+        else:
+            try:
+                address = resolve_address(ba_output.raw_input, chain)
+                if not ADDRESS_RE.match(address):
+                    raise InvalidInputError(
+                        f"'{address}' is not a valid address (0x + 40 hex "
+                        "characters)")
+            except Exception as e:
+                logger.warning("lookup for %s failed: %s",
+                               ba_output.raw_input, type(e).__name__)
+                return _lookup_error_reply(e, chain), None, missing
+
+        self._status(f"Comparing the address against {config.name}")
+        self._turn_address = address
+        outcome = run_detector(config, address, chain, context)
+        if outcome.raw_reply is not None:
+            self._turn_detector_reply = (outcome.detector_name,
+                                         outcome.raw_reply)
+        if not outcome.ok:
+            return _detector_failed_reply(outcome), None, missing
+
+        result = DetectionResult(**outcome.core.model_dump(),
+                                 explanation=outcome.explanation or "")
+        if not config.is_llm_based:
+            result = explain_detector_result(result, outcome.detector_name,
+                                             context)
+            print(">>> EXPLAIN_DETECTOR_RESULT RAN", flush=True)
+            result = self.fi.explain(
+                result, context,
+                expertise_tier=ba_output.expertise_tier,
+                use_case=ba_output.use_case)
+            print(">>> FORENSIC INVESTIGATOR RAN", flush=True)
+        reply = summarize_detection(result)
+        if result.label == "insufficient_evidence":
+            reply = _INSUFFICIENT_INTRO + " " + reply
+        if outcome.notes:
+            reply += " " + " ".join(outcome.notes)
+        return reply, result, missing
+
     def _run_turn(self) -> TurnResult:
         user_text = self.history[-1]["content"]
 
-        # Only the turn right after questions were asked can be the answer to them.
         answering_for = self._awaiting_answer
+        self._turn_context = None
+        self._turn_detector_reply = None
+        self._turn_address = None
 
+        self._status("Reading your message")
         ba_output = self.ba.analyse(self._send_window())
+        if ba_output.expertise_tier:
+            self.expertise_tier = ba_output.expertise_tier
+        if ba_output.use_case:
+            self.use_case = ba_output.use_case
 
-        # The Business Analyser could not confidently determine the user's
-        # expertise/use case.
         if ba_output.needs_clarification:
             if self._awaiting_profile_clarification:
-                # We already asked an open clarification question and the answer
-                # was still ambiguous, so fall back to the wireframe's options.
                 reply = _PROFILE_FALLBACK_REPLY
                 quick_replies = list(_PROFILE_FALLBACK_OPTIONS)
 
-                # The fallback has now replaced the open-ended clarification.
                 self._awaiting_profile_clarification = False
             else:
-                # First attempt: use the natural leading question generated by
-                # the Business Analyser.
                 reply = (
                     ba_output.direct_response
                     or "Just so I can explain things the right way, have you used "
@@ -397,14 +545,16 @@ class ChatSession:
                 reply=reply,
                 ba_output=ba_output,
                 quick_replies=quick_replies,
+                expertise_tier=self.expertise_tier,
+                use_case=self.use_case,
             )
 
-        # Profile information was successfully inferred.
         self._awaiting_profile_clarification = False
 
         detection_result = None
         detection_source = None
         cited: List[Dict[str, Optional[str]]] = []
+        detector_name = None
         missing: Dict[str, str] = {}
         questions: List[str] = []
         ask_for: Optional[Tuple[str, str]] = None
@@ -426,12 +576,16 @@ class ChatSession:
             reply = ba_output.direct_response or "I can't help with that yet."
         elif not is_supported(ba_output.raw_input):
             reply = _unresolved_input_reply(ba_output.raw_input)
+        elif ba_output.detector_configured:
+            reply, detection_result, missing = self._detector_check(ba_output)
+            if detection_result is not None:
+                detection_source = SOURCE_DETECTOR
+                detector_name = self.detector.name
         else:
             context, reply = self._fetch_context(ba_output)
             if context is not None:
                 missing = missing_fields(context)
                 key = (context.chain.lower(), context.address.lower())
-                # The user's answer is extra (user-reported) evidence for the address the questions were about. Moving on to a different address is a fresh check, not an answer.
                 notes = self._user_notes.get(key, [])
                 if answering_for == key:
                     notes = notes + [user_text]
@@ -440,14 +594,28 @@ class ChatSession:
                 can_ask = self._rounds_asked.get(key,
                                                  0) < MAX_CLARIFICATION_ROUNDS
                 if len(missing) >= len(FETCHERS):
-                    # Nothing on-chain came back, so there's nothing for the Scam Checker to ground a verdict in.
                     reply = _no_data_reply(context)
                     questions = _fallback_questions(context)
                 else:
-                    detection_result, questions = self.sc.check(context, notes)
+                    self._status("Analysing the evidence")
+                    detection_result, questions = self.sc.check(
+                        context,
+                        notes,
+                        expertise_tier=self.expertise_tier,
+                        use_case=self.use_case)
+                    print(">>> SCAM CHECKER RAN", flush=True)
+
                     detection_source = SOURCE_SCAM_CHECKER
                     # Only a reply that carries a verdict cites its sources.
                     cited = citations(context)
+                    # 3-agent pipeline: BA -> Scam Checker -> Forensic
+                    # Investigator. Falls back to the Scam Checker's own
+                    # explanation if the investigator fails.
+                    self._status("Writing the explanation")
+                    detection_result = self.fi.explain(
+                        detection_result, context,
+                        expertise_tier=self.expertise_tier,
+                        use_case=self.use_case)
                     reply = summarize_detection(detection_result)
                     if detection_result.label == "insufficient_evidence":
                         questions = questions or _fallback_questions(context)
@@ -461,7 +629,6 @@ class ChatSession:
                 else:
                     questions = []
 
-        # State only changes once the turn has succeeded, so a failed turn (rolled back in handle_message) leaves it as it was.
         if notes_for is not None:
             self._user_notes[notes_for] = self._user_notes.get(
                 notes_for, []) + [user_text]
@@ -487,6 +654,13 @@ class ChatSession:
                           ba_output=ba_output,
                           detection_result=detection_result,
                           detection_source=detection_source,
+                          detector_name=detector_name,
                           missing_fields=list(missing),
                           clarifying_questions=questions,
-                          citations=cited)
+                          citations=cited,
+                          expertise_tier=self.expertise_tier,
+                          use_case=self.use_case,
+                          raw_data=build_raw_data(ba_output,
+                                                  self._turn_context,
+                                                  self._turn_detector_reply,
+                                                  self._turn_address))
