@@ -1,10 +1,7 @@
 import logging
 from dataclasses import dataclass, field
-<<<<<<< HEAD
 from typing import Callable, Dict, List, Optional, Tuple
-=======
 from typing import Any, Dict, List, Optional, Tuple
->>>>>>> release
 
 from agents.business_analyser import BusinessAnalyser
 from agents.forensic_investigator import ForensicInvestigator
