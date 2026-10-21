@@ -6,15 +6,26 @@ document.addEventListener('DOMContentLoaded', () => {
   const thread = document.getElementById('thread');
   const promptHint = document.getElementById('promptHint');
   const plusIcon = document.getElementById('plusIcon');
-  const adminToggle = document.getElementById('adminToggle');
+  const adminBtn = document.getElementById('adminBtn');
+  const adminBtnLabel = document.getElementById('adminBtnLabel');
+  const adminDialog = document.getElementById('adminDialog');
+  const adminForm = document.getElementById('adminForm');
+  const adminPass = document.getElementById('adminPass');
+  const adminError = document.getElementById('adminError');
+  const adminCancel = document.getElementById('adminCancel');
+  const attachNote = document.getElementById('attachNote');
   const sidebar = document.getElementById('sidebar');
   const aiMsgTemplate = document.getElementById('aiMsgTemplate');
-  const fileChipTemplate = document.getElementById('fileChipTemplate');
   const addSourceBtn = document.getElementById('addSourceBtn');
   const llmConfigRows = document.getElementById('llmConfigRows');
   const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
   const llmConfigStatus = document.getElementById('llmConfigStatus');
-  const sourceFileInput = document.getElementById('sourceFileInput');
+  const addSourceForm = document.getElementById('addSourceForm');
+  const sourceNameInput = document.getElementById('sourceNameInput');
+  const sourceUrlInput = document.getElementById('sourceUrlInput');
+  const sourceCancelBtn = document.getElementById('sourceCancelBtn');
+  const addSourceStatus = document.getElementById('addSourceStatus');
+  const downloadStatus = document.getElementById('downloadStatus');
   const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
   const detectorSelect = document.getElementById('detectorSelect');
   const detectorStatus = document.getElementById('detectorStatus');
@@ -27,22 +38,20 @@ document.addEventListener('DOMContentLoaded', () => {
     ? 'http://localhost:8000'
     : '';
   const CHAT_API_URL = API_BASE + '/chat';
+  const CHAT_STATUS_URL = API_BASE + '/chat/status';
   const RESET_API_URL = API_BASE + '/session/reset';
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
-
-  adminToggle.addEventListener('change', () => {
-    sidebar.style.display = adminToggle.checked ? 'block' : 'none';
-  });
 
   backToStart.addEventListener('click', () => {
     window.location.href = '../starting-page/index.html';
   });
 
+  // File attachments are not supported by the backend yet, so say so instead of faking an attachment.
   plusIcon.addEventListener('click', () => {
-    const chip = cloneTemplate(fileChipTemplate);
-    const inputRow = document.querySelector('.input-row');
-    inputRow.parentNode.insertBefore(chip, inputRow);
+    attachNote.hidden = false;
+    clearTimeout(plusIcon._noteTimer);
+    plusIcon._noteTimer = setTimeout(() => { attachNote.hidden = true; }, 4000);
   });
 
   // ---------- Connected sources (admin sidebar) ----------
@@ -53,42 +62,112 @@ document.addEventListener('DOMContentLoaded', () => {
     item.classList.add('active');
   });
 
-  // "Add source" now ingests an uploaded detector/config file (built from the API
-  // Wrapper Template) rather than just a typed-in name. Clicking the button opens
-  // the hidden file input; the chosen file's name is shown as the new source item.
-  // No actual upload to a backend endpoint yet - wiring that up, and validating the
-  // file against the wrapper template's schema, is backend work for a later sprint.
-  addSourceBtn.addEventListener('click', () => {
-    sourceFileInput.click();
-  });
+  // ---------- Add source ----------
+  // "+ add source" opens a small form for the address of a running Detector API Wrapper (the container built from the downloadable template). The server checks that the wrapper is up and has a detector set up, then lists it under Active Detector below.
+  const SOURCES_URL = API_BASE + '/admin/sources';
+  const TEMPLATE_URL = API_BASE + '/admin/wrapper-template';
 
-  sourceFileInput.addEventListener('change', () => {
-    const file = sourceFileInput.files && sourceFileInput.files[0];
-    if (!file) return;
+  // Error replies carry a readable `detail`; fall back to a generic line if there isn't one.
+  async function errorDetail(res, fallback) {
+    try {
+      const body = await res.json();
+      if (body && typeof body.detail === 'string') return body.detail;
+    } catch (err) { /* not JSON */ }
+    return fallback;
+  }
 
+  function addSourceItem(id, name) {
+    if (!addSourceBtn || !addSourceBtn.parentNode) return;
+    const exists = Array.from(sidebar.querySelectorAll('.source-item'))
+      .some(el => el.dataset.source === id);
+    if (exists) return;
     const item = document.createElement('div');
     item.className = 'source-item';
     item.tabIndex = 0;
-    item.dataset.source = file.name;
-    item.textContent = file.name;
+    item.dataset.source = id;
+    item.appendChild(document.createTextNode(name || id));
     const dot = document.createElement('span');
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+  }
 
-    // Reset so selecting the same file again still fires 'change'.
-    sourceFileInput.value = '';
-  });
+  function setAddSourceOpen(open) {
+    if (!addSourceForm) return;
+    addSourceForm.style.display = open ? 'block' : 'none';
+    if (open && sourceNameInput) sourceNameInput.focus();
+    if (!open && addSourceStatus) addSourceStatus.textContent = '';
+  }
 
-  // Stub only: real deployment of the API Wrapper Template repo as a Docker image
-  // happens in Sprint 3. This just marks where that download call will go, so the
-  // button is wired up and visible now without the actual asset existing yet.
-  downloadTemplateBtn.addEventListener('click', () => {
-    // TODO (Sprint 3): replace with a real download of the API Wrapper Template's
-    // Docker image once that deployment pipeline exists. For now this is a no-op
-    // placeholder so the button renders and is clickable without erroring.
-    console.log('Download API wrapper template - not yet implemented (Sprint 3).');
-  });
+  if (!addSourceBtn || !addSourceForm) {
+    console.warn('Add source controls are missing from the page.');
+  } else {
+    addSourceBtn.addEventListener('click', () => {
+      setAddSourceOpen(addSourceForm.style.display === 'none');
+    });
+
+    if (sourceCancelBtn) {
+      sourceCancelBtn.addEventListener('click', () => setAddSourceOpen(false));
+    }
+
+    addSourceForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = sourceNameInput ? sourceNameInput.value.trim() : '';
+      const url = sourceUrlInput ? sourceUrlInput.value.trim() : '';
+      if (!name || !url) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Enter a name and the wrapper address.';
+        return;
+      }
+      if (addSourceStatus) addSourceStatus.textContent = 'Checking the wrapper…';
+      try {
+        const res = await fetch(SOURCES_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, url }),
+        });
+        if (!res.ok) {
+          if (addSourceStatus) addSourceStatus.textContent = await errorDetail(res, 'Could not add the source.');
+          return;
+        }
+        const data = await res.json();
+        addSourceItem(data.added.id, data.added.name);
+        renderDetectorConfig(data.config);
+        if (sourceNameInput) sourceNameInput.value = '';
+        if (sourceUrlInput) sourceUrlInput.value = '';
+        setAddSourceOpen(false);
+        if (detectorStatus) detectorStatus.textContent = `Added "${data.added.name}". Choose it here to use it.`;
+      } catch (err) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
+
+  // Downloads the wrapper's Docker setup (Dockerfile, docker-compose.yml, .env.example and source) as a ZIP. The steps under the button say how to run it.
+  if (!downloadTemplateBtn) {
+    console.warn('Download template button is missing from the page.');
+  } else {
+    downloadTemplateBtn.addEventListener('click', async () => {
+      if (downloadStatus) downloadStatus.textContent = 'Preparing the download…';
+      try {
+        const res = await fetch(TEMPLATE_URL);
+        if (!res.ok) {
+          if (downloadStatus) downloadStatus.textContent = await errorDetail(res, 'The template could not be downloaded.');
+          return;
+        }
+        const blob = await res.blob();
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'detector-api-wrapper-template.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        if (downloadStatus) downloadStatus.textContent = 'Downloaded. Follow the steps below to run it.';
+      } catch (err) {
+        if (downloadStatus) downloadStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
 
   // ---------- Admin password gate ----------
   // Hardcoded shared passphrase per the client's own suggestion (confirmed
@@ -96,23 +175,53 @@ document.addEventListener('DOMContentLoaded', () => {
   // real auth/accounts are explicitly out of scope for this project).
   const ADMIN_PASSPHRASE = 'admin';
 
-  adminToggle.addEventListener('change', () => {
-    if (adminToggle.checked) {
-      const attempt = window.prompt('Enter the admin passphrase');
-      if (attempt !== ADMIN_PASSPHRASE) {
-        adminToggle.checked = false;
-        sidebar.style.display = 'none';
-        if (attempt !== null) {
-          window.alert('Incorrect passphrase.');
-        }
-        return;
-      }
-      sidebar.style.display = 'block';
+  let adminOn = false;
+
+  function setAdmin(on) {
+    adminOn = on;
+    sidebar.style.display = on ? 'block' : 'none';
+    adminBtn.classList.toggle('active', on);
+    adminBtn.setAttribute('aria-pressed', String(on));
+    adminBtnLabel.textContent = on ? 'Admin (exit)' : 'Admin';
+    if (on) {
       loadLlmConfig();
       loadDetectorConfig();
-    } else {
-      sidebar.style.display = 'none';
     }
+  }
+
+  function closeAdminDialog() {
+    adminDialog.hidden = true;
+    adminPass.value = '';
+    adminError.hidden = true;
+    adminBtn.focus();
+  }
+
+  adminBtn.addEventListener('click', () => {
+    if (adminOn) {
+      setAdmin(false);
+      return;
+    }
+    adminDialog.hidden = false;
+    adminPass.focus();
+  });
+
+  adminForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (adminPass.value === ADMIN_PASSPHRASE) {
+      closeAdminDialog();
+      setAdmin(true);
+    } else {
+      adminError.hidden = false;
+      adminPass.select();
+    }
+  });
+
+  adminCancel.addEventListener('click', closeAdminDialog);
+  adminDialog.addEventListener('click', (e) => {
+    if (e.target === adminDialog) closeAdminDialog();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !adminDialog.hidden) closeAdminDialog();
   });
 
   // ---------- LLM Backend config (FR-14) ----------
@@ -240,6 +349,8 @@ document.addEventListener('DOMContentLoaded', () => {
     detectorSelect.appendChild(none);
 
     data.detectors.forEach(detector => {
+      // Wrappers added earlier show under Connected sources too.
+      if (detector.id.startsWith('wrapper_')) addSourceItem(detector.id, detector.name);
       const opt = document.createElement('option');
       opt.value = detector.id;
       opt.textContent = detector.name || detector.id;
@@ -330,6 +441,12 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   function evidenceList(evidence) {
+    const box = document.createElement('div');
+    box.className = 'evidence-box';
+    const heading = document.createElement('p');
+    heading.className = 'evidence-box-label';
+    heading.textContent = 'Evidence';
+    box.appendChild(heading);
     const ul = document.createElement('ul');
     ul.className = 'evidence-list';
     // Strongest evidence first - the backend returns it in no particular order.
@@ -342,7 +459,8 @@ document.addEventListener('DOMContentLoaded', () => {
       li.appendChild(weight);
       ul.appendChild(li);
     });
-    return ul;
+    box.appendChild(ul);
+    return box;
   }
 
   function detailBlock(rows) {
@@ -451,6 +569,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return appendAiMsg('Thinking…', 'msg-pending');
   }
 
+  // While the answer is being worked out, ask the server what it is doing and show that in the pending bubble. Returns a function that stops the polling.
+  function startStatusPolling(pending) {
+    const label = pending.querySelector('.msg-ai-text');
+    let stopped = false;
+    let timer = null;
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch(CHAT_STATUS_URL);
+        if (res.ok && !stopped) {
+          const data = await res.json();
+          if (data.status && label) label.textContent = data.status + '…';
+        }
+      } catch (err) {
+        // Status is cosmetic. The bubble keeps its last text.
+      }
+      if (!stopped) timer = setTimeout(poll, 400);
+    }
+
+    timer = setTimeout(poll, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
   function appendErrorMsg(title, text) {
     appendAiMsg(text, 'msg-error', title);
   }
@@ -469,14 +614,17 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInput.disabled = true;
     sending = true;
     const pending = appendPendingMsg();
+    let stopStatus = () => {};
 
     try {
       await sessionReady;
+      stopStatus = startStatusPolling(pending);
       const res = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
+      stopStatus();
       pending.remove();
 
       if (!res.ok) {
@@ -491,6 +639,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       appendReply(data);
     } catch (err) {
+      stopStatus();
       pending.remove();
       appendErrorMsg(
         'Connection issue',

@@ -38,12 +38,13 @@ Known red-flag patterns to check for explicitly (each is meaningful evidence on 
 - Hidden logic: contract.verified_source is false and/or contract.abi is empty, no one can audit what the contract actually does. Only apply this when contract.is_contract is true - a wallet (is_contract false) has no code, so an unverified source or empty ABI is normal and not a red flag.
 - Concentration risk: a single token balance that represents an implausibly large share of a small/new token's apparent supply. Only apply this if the context includes the token's total supply; never estimate supply. Tokens held by a wallet are usually unsolicited airdrops and are not evidence against the wallet.
 - Fresh, thin history: a contract with only one or two tx_history entries and a recent creation_tx has no track record to vouch for it.
+- Depegging: a token that presents itself as a stablecoin (a USD-style symbol such as USDT, USDC or DAI in the token_pair, or "USD" in its name) whose largest pool shows a "remove" event in liquidity_events or a very low liquidity_usd for a stablecoin. DexScreener gives no depeg label or tag, so judge only from these liquidity fields; the context carries no price, so never claim the price has or has not held its peg.
 None of these alone proves "scam" with certainty, but each one should raise confidence and pull the label away from "not_scam", do not let the mere presence of a creator address or a creation_tx (which every contract has) offset these red flags, since those fields carry no positive signal by themselves.
 
 Known reassuring patterns worth logging as evidence when the label is "not_scam", but ONLY when the field involved was fetched and its actual values show the pattern - cite fewer items rather than inventing one (these are genuine positive signal, unlike a bare creator/creation_tx):
 - contract.verified_source is true (source code can be audited).
 - liquidity_usd well above the ~$5,000 thin-liquidity line, with no "remove" events in liquidity_events.
-- Multiple tx_history entries over time from varied counterparties, showing a real usage history rather than a single fresh transaction.
+- For contracts only (contract.is_contract true): multiple tx_history entries over time from varied counterparties, showing a real usage history rather than a single fresh transaction.
 - No implausibly large single token balance relative to apparent supply.
 - An empty liquidity_events list is only weak evidence (weight 0.1 at most), because removal events can only be detected after the same pool has been checked more than once.
 
@@ -69,7 +70,7 @@ Respond with ONLY a single JSON object, no prose, no markdown code fences, in th
 """
 
 # Appended only when the address is a plain wallet.
-WALLET_RULE = """Wallets vs contracts: when contract.is_contract is false, the address is a plain wallet, not a contract - source verification, ABI and creator do not apply to it, so never cite them as a red flag. A wallet with no (or almost no) transaction history, no tokens and no user-reported context has nothing to judge either way: an empty history is not evidence of a scam, so use "insufficient_evidence" rather than "scam". For the same reason, never list an empty tx_history or empty tokens as an evidence item in either direction - absence of activity is simply no evidence."""
+WALLET_RULE = """Wallets vs contracts: when contract.is_contract is false, the address is a plain wallet, not a contract - source verification, ABI and creator do not apply to it, so never cite them as a red flag. A wallet with no (or almost no) transaction history, no tokens and no user-reported context has nothing to judge either way: an empty history is not evidence of a scam, so use "insufficient_evidence" rather than "scam". For the same reason, never list an empty tx_history or empty tokens as an evidence item in either direction - absence of activity is simply no evidence. For the same reason, a long or busy tx_history, many counterparties or a varied token portfolio are not reassuring evidence for a wallet either, since scammer and exploiter wallets look the same, so never cite them toward "not_scam"; without user-reported context, use "insufficient_evidence"."""
 
 # Appended only when the user has answered clarifying questions.
 USER_REPORTED_RULE = """User-reported context: "user_reported_context" (present only when the user has answered your earlier clarifying questions) is the user's own account of how they came across this address - e.g. who sent it, what they were promised, what they were asked to do. It is NOT on-chain evidence and cannot be verified. When it is present you must read it and turn each concrete claim in it into its own evidence item: start each such description with "User reports: " and give it a weight of at most 0.3. Check it against well-known scam patterns: unsolicited DMs, guaranteed or outsized returns, "send X and get more back" giveaway/doubling offers, pressure to act fast, being asked to send funds or approve a token to "unlock", "verify" or "claim" something. If it matches one of these, that is a real warning sign even when the on-chain data is empty - use label "scam" (the confidence stays modest because the evidence is user-reported) and explain the pattern, rather than "insufficient_evidence". Say in the explanation which points came from the user and which from the chain."""
@@ -147,6 +148,19 @@ class ScamChecker:
         elif evidence and all(_is_user_reported(e) for e in evidence):
             data["confidence"] = min(data["confidence"],
                                      MAX_USER_ONLY_CONFIDENCE)
+        if data.get("label") == "not_scam":
+            has_user_evidence = any(_is_user_reported(e) for e in evidence)
+            if _is_wallet(context) and not has_user_evidence:
+                data.update(label="insufficient_evidence",
+                            risk_type=None,
+                            evidence=[],
+                            explanation=WALLET_NOT_SCAM_EXPLANATION,
+                            reasoning_trace=None)
+                evidence = []
+                data["confidence"] = 0.0
+            else:
+                data["confidence"] = min(data["confidence"],
+                                         MAX_NOT_SCAM_CONFIDENCE)
         result = DetectionResult(**data)
 
         questions = []
@@ -196,7 +210,16 @@ EMPTY_ADDRESS_EXPLANATION = (
 USER_REPORTED_PREFIX = "user reports:"
 MAX_USER_REPORTED_WEIGHT = 0.3
 MAX_USER_ONLY_CONFIDENCE = 0.5
+MAX_NOT_SCAM_CONFIDENCE = 0.6
+WALLET_NOT_SCAM_EXPLANATION = (
+    "This address is a regular wallet, not a contract. Its activity, such as how "
+    "many transactions it has made or tokens it holds, doesn't show whether it's "
+    "safe: wallets used by scammers and hackers often look just as busy. Without "
+    "more context, I can't say whether it's safe to deal with."
+)
 
+def _is_wallet(context: AddressContext) -> bool:
+    return context.contract is not None and not context.contract.is_contract
 
 def _has_onchain_activity(context: AddressContext) -> bool:
     return bool((context.contract is not None and context.contract.is_contract)
@@ -254,11 +277,11 @@ def compact_context(context: AddressContext) -> dict:
 
 
 def _confidence_from_evidence(evidence: list[dict]) -> float:
-    if not evidence:
-        return 0.0
-    total = sum(item.get("weight", 0.0) for item in evidence)
-    return min(1.0, round(total, 2))
-
+    remaining = 1.0
+    for item in evidence:
+        weight = max(0.0, min(1.0, float(item.get("weight", 0.0) or 0.0)))
+        remaining *= 1.0 - weight
+    return round(1.0 - remaining, 2)
 
 def _parse_json(text: str) -> dict:
     cleaned = text.strip()
