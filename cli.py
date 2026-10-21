@@ -76,8 +76,9 @@ def print_turn_error(error: Exception):
             "Bot: Something went wrong on that one, so I couldn't answer it.",
             _STATUS_COLOURS["insufficient_evidence"]))
     print(f"     ({type(error).__name__}: {error})")
-    print("     If this keeps happening, check that the LLM backend (Ollama) "
-          "is running.")
+    backend = os.getenv("LLM_PROVIDER", "Ollama")
+    print(f"     If this keeps happening, check that the LLM backend "
+          f"({backend}) is reachable and within its usage limits.")
 
 
 def run_one_shot(session: ChatSession, message: str):

@@ -89,6 +89,11 @@ def _build_native(name: str, api_key: str, model: str) -> LLMProvider:
     if not model:
         raise ValueError(f"No model set for {name}")
     provider_class = getattr(importlib.import_module(module_name), class_name)
+    if name == "gemini":
+        # Gemini's thinking tokens count against max_tokens, so leaving it on truncates the JSON replies. 0 turns it off.
+        return provider_class(api_key=api_key, model=model,
+                              thinking_budget=int(
+                                  os.getenv("GEMINI_THINKING_BUDGET", "0")))
     return provider_class(api_key=api_key, model=model)
 
 
