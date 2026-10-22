@@ -592,6 +592,104 @@ document.addEventListener('DOMContentLoaded', () => {
     return box;
   }
 
+  // ---------- Raw evidence (professional users only) ----------
+  // The identifiers the data sources returned, kept apart from the AI's explanation. Shown only when the user's expertise is professional (auditors, investigators); everyone else gets the plain reply.
+  const RAW_TYPE_LABELS = [
+    ['transaction_hash', 'Transaction hashes'],
+    ['contract_address', 'Contract addresses'],
+    ['wallet_address', 'Wallet addresses'],
+    ['account_address', 'Account addresses'],
+    ['address', 'Other addresses'],
+    ['block_hash', 'Block hashes'],
+  ];
+  const RAW_PREVIEW_COUNT = 5;
+  const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+  const HEX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+  // Explorer page for a value, only where one is known: Etherscan covers Ethereum alone, and it has no page we can build from a block hash.
+  function explorerUrl(type, value, chain) {
+    if (chain !== 'ethereum') return null;
+    if (type === 'transaction_hash' && HEX_HASH.test(value)) return 'https://etherscan.io/tx/' + value;
+    if (type !== 'block_hash' && type !== 'transaction_hash' && HEX_ADDRESS.test(value)) return 'https://etherscan.io/address/' + value;
+    return null;
+  }
+
+  function rawItemRow(item, chain) {
+    const row = document.createElement('li');
+    row.className = 'raw-item';
+    const url = explorerUrl(item.type, item.value, chain);
+    const value = document.createElement(url ? 'a' : 'span');
+    value.className = 'raw-value';
+    value.textContent = item.value;
+    if (url) {
+      value.href = url;
+      value.target = '_blank';
+      value.rel = 'noopener noreferrer';
+      value.title = 'Open on Etherscan in a new tab';
+    }
+    const meta = document.createElement('span');
+    meta.className = 'raw-meta';
+    meta.textContent = item.source + (item.field ? ' \u00B7 ' + item.field : '');
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'raw-copy';
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(item.value);
+        copy.textContent = 'Copied';
+      } catch (err) {
+        copy.textContent = 'Not copied';
+      }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    });
+    row.append(value, meta, copy);
+    return row;
+  }
+
+  function rawEvidenceBlock(raw) {
+    if (!raw || !Array.isArray(raw.items) || raw.items.length === 0) return null;
+    const block = document.createElement('div');
+    block.className = 'raw-block';
+    const heading = document.createElement('p');
+    heading.className = 'raw-block-label';
+    heading.textContent = 'Raw evidence';
+    block.appendChild(heading);
+    const note = document.createElement('p');
+    note.className = 'raw-block-note';
+    const sources = Array.isArray(raw.sources) && raw.sources.length ? raw.sources.join(', ') : 'the data sources';
+    note.textContent = 'Identifiers exactly as returned by ' + sources + '. Not interpreted by the AI.';
+    block.appendChild(note);
+
+    RAW_TYPE_LABELS.forEach(([type, title]) => {
+      const items = raw.items.filter(i => i && i.type === type && typeof i.value === 'string');
+      if (!items.length) return;
+      const group = document.createElement('div');
+      group.className = 'raw-group';
+      const groupTitle = document.createElement('p');
+      groupTitle.className = 'raw-group-title';
+      groupTitle.textContent = title + ' (' + items.length + ')';
+      group.appendChild(groupTitle);
+      const list = document.createElement('ul');
+      list.className = 'raw-list';
+      items.slice(0, RAW_PREVIEW_COUNT).forEach(i => list.appendChild(rawItemRow(i, raw.chain)));
+      group.appendChild(list);
+      if (items.length > RAW_PREVIEW_COUNT) {
+        const more = document.createElement('details');
+        more.className = 'raw-more';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Show ' + (items.length - RAW_PREVIEW_COUNT) + ' more';
+        const moreList = document.createElement('ul');
+        moreList.className = 'raw-list';
+        items.slice(RAW_PREVIEW_COUNT).forEach(i => moreList.appendChild(rawItemRow(i, raw.chain)));
+        more.append(summary, moreList);
+        group.appendChild(more);
+      }
+      block.appendChild(group);
+    });
+    return block;
+  }
+
   function detailBlock(rows) {
     const block = document.createElement('div');
     block.className = 'evidence-block';
@@ -663,6 +761,11 @@ document.addEventListener('DOMContentLoaded', () => {
       rows.push(['Source', source]);
     }
     if (rows.length) div.appendChild(detailBlock(rows));
+
+    if (data.expertise_tier === 'professional') {
+      const rawBlock = rawEvidenceBlock(data.raw_data);
+      if (rawBlock) div.appendChild(rawBlock);
+    }
 
     // Shown on every reply that relied on fetched data, so a check that couldn't run is never mistaken for a clean one.
     if (Array.isArray(data.missing_fields) && data.missing_fields.length) {
