@@ -771,3 +771,93 @@ body {
   color: #a02a2a;
   margin: -2px 0 6px;
 }
+/* Raw evidence (professional users only) */
+.raw-block {
+  background: #ffffff;
+  border: 1px solid #cfd5db;
+  border-left: 3px solid #1f3a5f;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+}
+
+.raw-block-label {
+  font-size: 11px;
+  font-weight: bold;
+  color: #14213d;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin: 0 0 4px;
+}
+
+.raw-block-note {
+  font-size: 12px;
+  color: #6b7684;
+  margin: 0 0 10px;
+}
+
+.raw-group {
+  margin-top: 10px;
+}
+
+.raw-group-title {
+  font-size: 12px;
+  font-weight: bold;
+  color: #33404f;
+  margin: 0 0 4px;
+}
+
+.raw-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.raw-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.raw-item:last-child {
+  border-bottom: none;
+}
+
+.raw-value {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  color: #14213d;
+  word-break: break-all;
+}
+
+a.raw-value {
+  text-decoration: underline;
+  text-decoration-color: #b8c1cb;
+}
+
+.raw-meta {
+  font-size: 11px;
+  color: #97a0a8;
+}
+
+.raw-copy {
+  margin-left: auto;
+  font: inherit;
+  font-size: 11px;
+  color: #33404f;
+  background: #fff;
+  border: 1px solid #cfd5db;
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.raw-more summary {
+  font-size: 12px;
+  color: #1f3a5f;
+  cursor: pointer;
+  margin-top: 4px;
+}
