@@ -603,6 +603,11 @@ document.addEventListener('DOMContentLoaded', () => {
     ['block_hash', 'Block hashes'],
   ];
   const RAW_PREVIEW_COUNT = 5;
+  // Professional users: a professional expertise tier, or a professional use case (investigators, police, auditors, compliance screeners). The assistant sets a plain-language user's tier to beginner even when their use case is professional, so the use case counts on its own.
+  const PROFESSIONAL_USE_CASES = ['investigative_legal', 'compliance_risk'];
+  function showsRawEvidence(data) {
+    return data.expertise_tier === 'professional' || PROFESSIONAL_USE_CASES.includes(data.use_case);
+  }
   const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
   const HEX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -762,7 +767,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (rows.length) div.appendChild(detailBlock(rows));
 
-    if (data.expertise_tier === 'professional') {
+    if (showsRawEvidence(data)) {
       const rawBlock = rawEvidenceBlock(data.raw_data);
       if (rawBlock) div.appendChild(rawBlock);
     }
