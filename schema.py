@@ -33,6 +33,27 @@ class BusinessAnalyserOutput(BaseModel):
     use_case: Optional[Literal["investment", "investigative_legal",
                                "compliance_risk"]] = None
     needs_clarification: bool = False
+    raw_inputs: List[RawInput] = Field(default_factory=list)
+
+    @field_validator("raw_inputs", mode="before")
+    @classmethod
+    def _null_raw_inputs(cls, value):
+        return value or []
+
+    @model_validator(mode="after")
+    def _sync_raw_inputs(self):
+        if not self.raw_inputs and self.raw_input is not None:
+            self.raw_inputs = [self.raw_input]
+        seen, distinct = set(), []
+        for raw in self.raw_inputs:
+            key = (raw.type, raw.value.strip().lower())
+            if key not in seen:
+                seen.add(key)
+                distinct.append(raw)
+        self.raw_inputs = distinct
+        if distinct:
+            self.raw_input = distinct[0]
+        return self
 
 
 class Evidence(BaseModel):
