@@ -615,35 +615,90 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  function appendReply(data) {
-    const div = appendAiMsg(data.reply);
-    const textEl = div.querySelector('.msg-ai-text');
-    // Terms already marked in this message, so each is bolded once.
-    const usedTerms = new Map();
-    renderWithTerms(textEl, data.reply, usedTerms);
+  function statusTag(label) {
+    const tag = STATUS_TAGS[label];
+    if (!tag) return null;
+    const span = document.createElement('span');
+    span.className = 'status-tag ' + tag.className;
+    span.textContent = tag.text;
+    return span;
+  }
 
-    const tag = STATUS_TAGS[data.label];
-    if (tag) {
-      const span = document.createElement('span');
-      span.className = 'status-tag ' + tag.className;
-      span.textContent = tag.text;
-      div.insertBefore(span, textEl);
+  function interpretationNote(text) {
+    const p = document.createElement('p');
+    p.className = 'interpretation-note';
+    p.textContent = text;
+    return p;
+  }
+
+  const INPUT_KINDS = { tx_hash: 'Transaction', token_name: 'Token' };
+
+  function addressCard(result, number, total, usedTerms) {
+    const card = document.createElement('section');
+    card.className = 'address-card';
+    card.dataset.label = result.label || 'none';
+    const kind = INPUT_KINDS[result.input_type] || 'Address';
+    card.setAttribute('aria-label', `${kind} ${number} of ${total}`);
+
+    const head = document.createElement('div');
+    head.className = 'address-card-head';
+    const title = document.createElement('span');
+    title.className = 'address-card-title';
+    title.textContent = `${kind} ${number} of ${total}`;
+    head.appendChild(title);
+    const tag = statusTag(result.label);
+    if (tag) head.appendChild(tag);
+    card.appendChild(head);
+
+    const value = document.createElement('code');
+    value.className = 'address-card-value';
+    value.textContent = result.input;
+    card.appendChild(value);
+    if (result.address && result.address.toLowerCase() !== result.input.toLowerCase()) {
+      const resolved = document.createElement('p');
+      resolved.className = 'address-card-resolved';
+      resolved.textContent = 'Checked address: ' + result.address;
+      card.appendChild(resolved);
     }
 
+    const text = document.createElement('p');
+    text.className = 'msg-ai-text';
+    renderWithTerms(text, result.reply, usedTerms);
+    card.appendChild(text);
+
+    appendVerdictDetails(card, result, usedTerms);
+    // Each address names its own data sources. The glossary pill goes once at the end of the whole message.
+    const citations = tag && Array.isArray(result.citations) ? result.citations : [];
+    const pills = citationRow(citations, new Map());
+    if (pills) card.appendChild(pills);
+    return card;
+  }
+
+  function appendMultiReply(data, usedTerms) {
+    const total = data.results.length;
+    const div = appendAiMsg(`I checked ${total} addresses - here's what I found for each:`);
+    data.results.forEach((result, i) => {
+      div.appendChild(addressCard(result, i + 1, total, usedTerms));
+    });
+    const skipped = data.skipped_inputs || [];
+    if (skipped.length) {
+      div.appendChild(interpretationNote(
+        `I only check ${total} at a time, so I left out ${skipped.join(', ')} - ` +
+        `send ${skipped.length === 1 ? 'it' : 'those'} in another message and I'll take a look.`
+      ));
+    }
+    return div;
+  }
+
+  function appendVerdictDetails(el, data, usedTerms) {
     const hasEvidence = Array.isArray(data.evidence) && data.evidence.length > 0;
 
     if (hasEvidence) {
-      div.appendChild(evidenceList(data.evidence, usedTerms));
+      el.appendChild(evidenceList(data.evidence, usedTerms));
     } else if (data.label === 'insufficient_evidence') {
-      const note = document.createElement('p');
-      note.className = 'interpretation-note';
-      note.textContent = 'Not enough on-chain data was found for this address to reach a scam or not-scam verdict.';
-      div.appendChild(note);
-    } else if (tag) {
-      const note = document.createElement('p');
-      note.className = 'interpretation-note';
-      note.textContent = 'No evidence items were itemised for this verdict.';
-      div.appendChild(note);
+      el.appendChild(interpretationNote('Not enough on-chain data was found for this address to reach a scam or not-scam verdict.'));
+    } else if (STATUS_TAGS[data.label]) {
+      el.appendChild(interpretationNote('No evidence items were itemised for this verdict.'));
     }
 
     const rows = [];
@@ -662,19 +717,34 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       rows.push(['Source', source]);
     }
-    if (rows.length) div.appendChild(detailBlock(rows));
+    if (rows.length) el.appendChild(detailBlock(rows));
 
     // Shown on every reply that relied on fetched data, so a check that couldn't run is never mistaken for a clean one.
     if (Array.isArray(data.missing_fields) && data.missing_fields.length) {
-      const note = document.createElement('p');
-      note.className = 'interpretation-note';
-      note.textContent = 'Not checked (data unavailable): ' +
-        data.missing_fields.map(f => MISSING_FIELD_WORDS[f] || f).join(', ');
-      div.appendChild(note);
+      el.appendChild(interpretationNote('Not checked (data unavailable): ' +
+        data.missing_fields.map(f => MISSING_FIELD_WORDS[f] || f).join(', ')));
+    }
+  }
+
+  function appendReply(data) {
+    // Terms already marked in this message, so each is bolded once.
+    const usedTerms = new Map();
+    let div;
+    let citations = [];
+    if (Array.isArray(data.results) && data.results.length > 0) {
+      // The cards carry their own source pills, so only the glossary pill is left for the end.
+      div = appendMultiReply(data, usedTerms);
+    } else {
+      div = appendAiMsg(data.reply);
+      const textEl = div.querySelector('.msg-ai-text');
+      renderWithTerms(textEl, data.reply, usedTerms);
+      const tag = statusTag(data.label);
+      if (tag) div.insertBefore(tag, textEl);
+      appendVerdictDetails(div, data, usedTerms);
+      citations = tag && Array.isArray(data.citations) ? data.citations : [];
     }
 
     // Pills close the message: a verdict names its data sources, and any defined term gets the glossary pill beside them.
-    const citations = tag && Array.isArray(data.citations) ? data.citations : [];
     const pills = citationRow(citations, usedTerms);
     if (pills) div.appendChild(pills);
 
@@ -792,6 +862,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   chatInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendMessage();
+  });
+
+  chatInput.addEventListener('paste', (e) => {
+    const pasted = e.clipboardData && e.clipboardData.getData('text');
+    if (!pasted || !/[\r\n]/.test(pasted)) return;
+    e.preventDefault();
+    const joined = pasted.split(/[\r\n]+/).map(line => line.trim()).filter(Boolean).join(', ');
+    chatInput.setRangeText(joined, chatInput.selectionStart, chatInput.selectionEnd, 'end');
   });
 
 

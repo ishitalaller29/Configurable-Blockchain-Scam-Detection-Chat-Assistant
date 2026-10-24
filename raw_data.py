@@ -181,3 +181,23 @@ def build_raw_data(
         "sources": c.sources,
         "items": c.items,
     }
+
+
+def merge_raw_data(
+        parts: List[Optional[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    c = _Collector()
+    for part in parts:
+        for item in part["items"]:
+            c.add(item["type"], item["value"], item["field"], item["source"])
+    return {
+        "chain": parts[0]["chain"],
+        "queried_address": parts[0]["queried_address"],
+        "queried_addresses": [
+            p["queried_address"] for p in parts if p["queried_address"]
+        ],
+        "sources": c.sources,
+        "items": c.items,
+    }
