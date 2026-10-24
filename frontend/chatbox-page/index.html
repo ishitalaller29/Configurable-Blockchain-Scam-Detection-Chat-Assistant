@@ -44,6 +44,17 @@
             <span class="source-dot"></span>
           </div>
           <button class="add-source" id="addSourceBtn">+ add source</button>
+          <form class="add-source-form" id="addSourceForm" style="display:none;" autocomplete="off">
+            <label class="form-label" for="sourceNameInput">Name</label>
+            <input type="text" id="sourceNameInput" maxlength="80" placeholder="My detector" />
+            <label class="form-label" for="sourceUrlInput">API wrapper address</label>
+            <input type="text" id="sourceUrlInput" placeholder="http://localhost:8002" inputmode="url" />
+            <div class="form-actions">
+              <button type="submit" class="download-template" id="sourceSubmitBtn">Add source</button>
+              <button type="button" class="download-template" id="sourceCancelBtn">Cancel</button>
+            </div>
+            <p class="step-note" id="addSourceStatus" role="status"></p>
+          </form>
         <div class="llm-config-section">
           <div class="sidebar-label-row">
             <p class="sidebar-label">Active Detector</p>
@@ -61,8 +72,19 @@
           <button class="add-source" id="saveLlmConfigBtn" type="button">Save LLM config</button>
           <p class="step-note" id="llmConfigStatus"></p>
         </div>
-          <input type="file" id="sourceFileInput" style="display:none;" />
           <button class="download-template" id="downloadTemplateBtn">Download API wrapper template</button>
+          <p class="step-note" id="downloadStatus" role="status"></p>
+          <details class="wrapper-steps">
+            <summary>How to set it up</summary>
+            <ol>
+              <li>Unzip the download and open the folder in a terminal.</li>
+              <li>Copy <code>.env.example</code> to <code>.env</code> and set <code>API_WRAPPER_KEY</code>.</li>
+              <li>In <code>docker-compose.yml</code>, change the published port to <code>8002:8000</code>, because this app already uses 8000.</li>
+              <li>Add your detector's provider config (see the wrapper's README), then run <code>docker compose up --build</code>.</li>
+              <li>Click <strong>+ add source</strong> and enter <code>http://localhost:8002</code>.</li>
+              <li>Choose it under <strong>Active Detector</strong>.</li>
+            </ol>
+          </details>
         </div>
         <div class="main-area">
           <div class="thread" id="thread">

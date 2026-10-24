@@ -20,7 +20,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const llmConfigRows = document.getElementById('llmConfigRows');
   const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
   const llmConfigStatus = document.getElementById('llmConfigStatus');
-  const sourceFileInput = document.getElementById('sourceFileInput');
+  const addSourceForm = document.getElementById('addSourceForm');
+  const sourceNameInput = document.getElementById('sourceNameInput');
+  const sourceUrlInput = document.getElementById('sourceUrlInput');
+  const sourceCancelBtn = document.getElementById('sourceCancelBtn');
+  const addSourceStatus = document.getElementById('addSourceStatus');
+  const downloadStatus = document.getElementById('downloadStatus');
   const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
   const detectorSelect = document.getElementById('detectorSelect');
   const detectorStatus = document.getElementById('detectorStatus');
@@ -33,6 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ? 'http://localhost:8000'
     : '';
   const CHAT_API_URL = API_BASE + '/chat';
+  const CHAT_STATUS_URL = API_BASE + '/chat/status';
   const RESET_API_URL = API_BASE + '/session/reset';
 
   const sessionReady = fetch(RESET_API_URL, { method: 'POST' }).catch(() => {});
@@ -56,42 +62,112 @@ document.addEventListener('DOMContentLoaded', () => {
     item.classList.add('active');
   });
 
-  // "Add source" now ingests an uploaded detector/config file (built from the API
-  // Wrapper Template) rather than just a typed-in name. Clicking the button opens
-  // the hidden file input; the chosen file's name is shown as the new source item.
-  // No actual upload to a backend endpoint yet - wiring that up, and validating the
-  // file against the wrapper template's schema, is backend work for a later sprint.
-  addSourceBtn.addEventListener('click', () => {
-    sourceFileInput.click();
-  });
+  // ---------- Add source ----------
+  // "+ add source" opens a small form for the address of a running Detector API Wrapper (the container built from the downloadable template). The server checks that the wrapper is up and has a detector set up, then lists it under Active Detector below.
+  const SOURCES_URL = API_BASE + '/admin/sources';
+  const TEMPLATE_URL = API_BASE + '/admin/wrapper-template';
 
-  sourceFileInput.addEventListener('change', () => {
-    const file = sourceFileInput.files && sourceFileInput.files[0];
-    if (!file) return;
+  // Error replies carry a readable `detail`; fall back to a generic line if there isn't one.
+  async function errorDetail(res, fallback) {
+    try {
+      const body = await res.json();
+      if (body && typeof body.detail === 'string') return body.detail;
+    } catch (err) { /* not JSON */ }
+    return fallback;
+  }
 
+  function addSourceItem(id, name) {
+    if (!addSourceBtn || !addSourceBtn.parentNode) return;
+    const exists = Array.from(sidebar.querySelectorAll('.source-item'))
+      .some(el => el.dataset.source === id);
+    if (exists) return;
     const item = document.createElement('div');
     item.className = 'source-item';
     item.tabIndex = 0;
-    item.dataset.source = file.name;
-    item.textContent = file.name;
+    item.dataset.source = id;
+    item.appendChild(document.createTextNode(name || id));
     const dot = document.createElement('span');
     dot.className = 'source-dot';
     item.appendChild(dot);
     addSourceBtn.parentNode.insertBefore(item, addSourceBtn);
+  }
 
-    // Reset so selecting the same file again still fires 'change'.
-    sourceFileInput.value = '';
-  });
+  function setAddSourceOpen(open) {
+    if (!addSourceForm) return;
+    addSourceForm.style.display = open ? 'block' : 'none';
+    if (open && sourceNameInput) sourceNameInput.focus();
+    if (!open && addSourceStatus) addSourceStatus.textContent = '';
+  }
 
-  // Stub only: real deployment of the API Wrapper Template repo as a Docker image
-  // happens in Sprint 3. This just marks where that download call will go, so the
-  // button is wired up and visible now without the actual asset existing yet.
-  downloadTemplateBtn.addEventListener('click', () => {
-    // TODO (Sprint 3): replace with a real download of the API Wrapper Template's
-    // Docker image once that deployment pipeline exists. For now this is a no-op
-    // placeholder so the button renders and is clickable without erroring.
-    console.log('Download API wrapper template - not yet implemented (Sprint 3).');
-  });
+  if (!addSourceBtn || !addSourceForm) {
+    console.warn('Add source controls are missing from the page.');
+  } else {
+    addSourceBtn.addEventListener('click', () => {
+      setAddSourceOpen(addSourceForm.style.display === 'none');
+    });
+
+    if (sourceCancelBtn) {
+      sourceCancelBtn.addEventListener('click', () => setAddSourceOpen(false));
+    }
+
+    addSourceForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = sourceNameInput ? sourceNameInput.value.trim() : '';
+      const url = sourceUrlInput ? sourceUrlInput.value.trim() : '';
+      if (!name || !url) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Enter a name and the wrapper address.';
+        return;
+      }
+      if (addSourceStatus) addSourceStatus.textContent = 'Checking the wrapper…';
+      try {
+        const res = await fetch(SOURCES_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, url }),
+        });
+        if (!res.ok) {
+          if (addSourceStatus) addSourceStatus.textContent = await errorDetail(res, 'Could not add the source.');
+          return;
+        }
+        const data = await res.json();
+        addSourceItem(data.added.id, data.added.name);
+        renderDetectorConfig(data.config);
+        if (sourceNameInput) sourceNameInput.value = '';
+        if (sourceUrlInput) sourceUrlInput.value = '';
+        setAddSourceOpen(false);
+        if (detectorStatus) detectorStatus.textContent = `Added "${data.added.name}". Choose it here to use it.`;
+      } catch (err) {
+        if (addSourceStatus) addSourceStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
+
+  // Downloads the wrapper's Docker setup (Dockerfile, docker-compose.yml, .env.example and source) as a ZIP. The steps under the button say how to run it.
+  if (!downloadTemplateBtn) {
+    console.warn('Download template button is missing from the page.');
+  } else {
+    downloadTemplateBtn.addEventListener('click', async () => {
+      if (downloadStatus) downloadStatus.textContent = 'Preparing the download…';
+      try {
+        const res = await fetch(TEMPLATE_URL);
+        if (!res.ok) {
+          if (downloadStatus) downloadStatus.textContent = await errorDetail(res, 'The template could not be downloaded.');
+          return;
+        }
+        const blob = await res.blob();
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'detector-api-wrapper-template.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        if (downloadStatus) downloadStatus.textContent = 'Downloaded. Follow the steps below to run it.';
+      } catch (err) {
+        if (downloadStatus) downloadStatus.textContent = 'Could not reach the server.';
+      }
+    });
+  }
 
   // ---------- Admin password gate ----------
   // Hardcoded shared passphrase per the client's own suggestion (confirmed
@@ -273,6 +349,8 @@ document.addEventListener('DOMContentLoaded', () => {
     detectorSelect.appendChild(none);
 
     data.detectors.forEach(detector => {
+      // Wrappers added earlier show under Connected sources too.
+      if (detector.id.startsWith('wrapper_')) addSourceItem(detector.id, detector.name);
       const opt = document.createElement('option');
       opt.value = detector.id;
       opt.textContent = detector.name || detector.id;
@@ -362,7 +440,134 @@ document.addEventListener('DOMContentLoaded', () => {
     liquidity: 'liquidity pool data',
   };
 
-  function evidenceList(evidence) {
+  // ---------- Jargon definitions (hover tips) ----------
+  // Plain-language definitions for blockchain terms that appear in replies. Each entry lists the spellings to match. Matching ignores case, and only the first use of a term in a message is bolded, so a reply isn't covered in highlights.
+  const GLOSSARY = [
+    { forms: ['liquidity pools', 'liquidity pool'], definition: 'A shared pot of two tokens that lets people trade one for the other. If it is small, or one person can empty it, trading can be risky.' },
+    { forms: ['liquidity'], definition: 'How easily a token can be bought or sold without moving its price. Low liquidity can make it hard to sell.' },
+    { forms: ['rug pulls', 'rug pull'], definition: 'A scam where the creators take the money out of a project and leave buyers holding worthless tokens.' },
+    { forms: ['honeypots', 'honeypot'], definition: 'A token that can be bought but not sold, so buyers are trapped.' },
+    { forms: ['pump and dump'], definition: 'A scheme that drives a price up with hype, then sells at the top, leaving later buyers with losses.' },
+    { forms: ['smart contracts', 'smart contract'], definition: 'A program stored on the blockchain that runs by itself when its conditions are met.' },
+    { forms: ['blockchain'], definition: 'A shared public record of transactions that no single person controls and that cannot easily be changed.' },
+    { forms: ['wallets', 'wallet'], definition: 'An account on the blockchain that holds tokens. It is identified by a long code called an address.' },
+    { forms: ['transaction history'], definition: 'The list of past transfers in and out of an address, with dates and amounts.' },
+    { forms: ['on-chain'], definition: 'Recorded on the blockchain itself, where anyone can check it.' },
+    { forms: ['minting', 'mint'], definition: 'Creating new tokens. If the owner can mint without limit, they can dilute everyone else.' },
+    { forms: ['verified source code'], definition: 'The contract\'s code has been published and matched to what runs on the blockchain, so people can read what it does.' },
+    { forms: ['DEX', 'decentralized exchange'], definition: 'A trading site that runs on smart contracts instead of a company, such as Uniswap.' },
+    { forms: ['ERC-20'], definition: 'The standard format most tokens on Ethereum follow, so wallets and exchanges can handle them.' },
+    { forms: ['wash trading'], definition: 'Trading with yourself to fake activity and make a token look popular.' },
+    { forms: ['phishing'], definition: 'Tricking people into giving up passwords, keys or approvals, often with a fake site or message.' },
+  ];
+
+  const GLOSSARY_LOOKUP = {};
+  GLOSSARY.forEach(entry => {
+    entry.forms.forEach(form => { GLOSSARY_LOOKUP[form.toLowerCase()] = entry; });
+  });
+  const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Longest spellings first, so "liquidity pool" wins over "liquidity".
+  const GLOSSARY_REGEX = new RegExp(
+    '(?<![\\w-])(' +
+    Object.keys(GLOSSARY_LOOKUP)
+      .sort((a, b) => b.length - a.length)
+      .map(escapeRegex)
+      .join('|') +
+    ')(?![\\w-])',
+    'gi'
+  );
+
+  // Fills `el` with `text`, turning the first use of each defined term into a bold, hoverable term. Built from text nodes, never innerHTML, so a reply is still shown literally. `seen` is a Map of the terms already marked in this message (glossary entry -> the wording used).
+  function renderWithTerms(el, text, seen) {
+    el.textContent = '';
+    let last = 0;
+    GLOSSARY_REGEX.lastIndex = 0;
+    let match;
+    while ((match = GLOSSARY_REGEX.exec(text)) !== null) {
+      const entry = GLOSSARY_LOOKUP[match[1].toLowerCase()];
+      if (seen.has(entry)) continue;
+      seen.set(entry, match[1]);
+      if (match.index > last) {
+        el.appendChild(document.createTextNode(text.slice(last, match.index)));
+      }
+      const term = document.createElement('span');
+      term.className = 'term';
+      term.tabIndex = 0;
+      term.appendChild(document.createTextNode(match[1]));
+      const tip = document.createElement('span');
+      tip.className = 'term-tooltip';
+      tip.setAttribute('role', 'tooltip');
+      tip.textContent = entry.definition;
+      term.appendChild(tip);
+      el.appendChild(term);
+      last = match.index + match[1].length;
+    }
+    if (last < text.length) {
+      el.appendChild(document.createTextNode(text.slice(last)));
+    }
+  }
+
+  // ---------- Citation pills ----------
+  // One pill per data source the verdict drew on, then a separate pill for the glossary when the reply defined any terms. Called last, so the pills sit at the end of the message.
+  function citationRow(citations, usedTerms) {
+    const row = document.createElement('div');
+    row.className = 'citation-row';
+    citations.forEach(c => {
+      if (!c || !c.name) return;
+      const pill = document.createElement(c.url ? 'a' : 'span');
+      pill.className = 'citation-pill';
+      pill.textContent = c.name;
+      if (c.url) {
+        pill.href = c.url;
+        pill.target = '_blank';
+        pill.rel = 'noopener noreferrer';
+        pill.title = 'Open ' + c.name + ' in a new tab';
+        const icon = document.createElement('span');
+        icon.className = 'citation-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '↗';
+        pill.appendChild(icon);
+      }
+      row.appendChild(pill);
+    });
+    if (usedTerms.size > 0) {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'citation-pill citation-pill-glossary';
+      pill.setAttribute('aria-expanded', 'false');
+      pill.title = 'Show the definitions used in this reply';
+      pill.textContent = 'Definitions: ChainCheck glossary';
+      const arrow = document.createElement('span');
+      arrow.className = 'citation-icon';
+      arrow.setAttribute('aria-hidden', 'true');
+      arrow.textContent = '\u25BE';
+      pill.appendChild(arrow);
+
+      // Clicking the pill opens the list of every term defined in this reply.
+      const panel = document.createElement('dl');
+      panel.className = 'glossary-panel';
+      panel.hidden = true;
+      usedTerms.forEach((wording, entry) => {
+        const dt = document.createElement('dt');
+        dt.textContent = wording;
+        const dd = document.createElement('dd');
+        dd.textContent = entry.definition;
+        panel.append(dt, dd);
+      });
+      pill.addEventListener('click', () => {
+        const open = panel.hidden;
+        panel.hidden = !open;
+        pill.setAttribute('aria-expanded', String(open));
+        arrow.textContent = open ? '\u25B4' : '\u25BE';
+        thread.scrollTop = thread.scrollHeight;
+      });
+      row.appendChild(pill);
+      row.appendChild(panel);
+    }
+    return row.childElementCount ? row : null;
+  }
+
+  function evidenceList(evidence, seen) {
     const box = document.createElement('div');
     box.className = 'evidence-box';
     const heading = document.createElement('p');
@@ -374,7 +579,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Strongest evidence first - the backend returns it in no particular order.
     [...evidence].sort((a, b) => b.weight - a.weight).forEach(item => {
       const li = document.createElement('li');
-      li.textContent = item.description;
+      const desc = document.createElement('span');
+      renderWithTerms(desc, item.description, seen);
+      li.appendChild(desc);
       const weight = document.createElement('span');
       weight.className = 'evidence-weight';
       weight.textContent = item.weight.toFixed(2);
@@ -426,7 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const INPUT_KINDS = { tx_hash: 'Transaction', token_name: 'Token' };
 
-  function addressCard(result, number, total) {
+  function addressCard(result, number, total, usedTerms) {
     const card = document.createElement('section');
     card.className = 'address-card';
     card.dataset.label = result.label || 'none';
@@ -456,18 +663,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const text = document.createElement('p');
     text.className = 'msg-ai-text';
-    text.textContent = result.reply;
+    renderWithTerms(text, result.reply, usedTerms);
     card.appendChild(text);
 
-    appendVerdictDetails(card, result);
+    appendVerdictDetails(card, result, usedTerms);
+    // Each address names its own data sources. The glossary pill goes once at the end of the whole message.
+    const citations = tag && Array.isArray(result.citations) ? result.citations : [];
+    const pills = citationRow(citations, new Map());
+    if (pills) card.appendChild(pills);
     return card;
   }
 
-  function appendMultiReply(data) {
+  function appendMultiReply(data, usedTerms) {
     const total = data.results.length;
     const div = appendAiMsg(`I checked ${total} addresses - here's what I found for each:`);
     data.results.forEach((result, i) => {
-      div.appendChild(addressCard(result, i + 1, total));
+      div.appendChild(addressCard(result, i + 1, total, usedTerms));
     });
     const skipped = data.skipped_inputs || [];
     if (skipped.length) {
@@ -479,11 +690,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return div;
   }
 
-  function appendVerdictDetails(el, data) {
+  function appendVerdictDetails(el, data, usedTerms) {
     const hasEvidence = Array.isArray(data.evidence) && data.evidence.length > 0;
 
     if (hasEvidence) {
-      el.appendChild(evidenceList(data.evidence));
+      el.appendChild(evidenceList(data.evidence, usedTerms));
     } else if (data.label === 'insufficient_evidence') {
       el.appendChild(interpretationNote('Not enough on-chain data was found for this address to reach a scam or not-scam verdict.'));
     } else if (STATUS_TAGS[data.label]) {
@@ -516,15 +727,26 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function appendReply(data) {
+    // Terms already marked in this message, so each is bolded once.
+    const usedTerms = new Map();
     let div;
+    let citations = [];
     if (Array.isArray(data.results) && data.results.length > 0) {
-      div = appendMultiReply(data);
+      // The cards carry their own source pills, so only the glossary pill is left for the end.
+      div = appendMultiReply(data, usedTerms);
     } else {
       div = appendAiMsg(data.reply);
+      const textEl = div.querySelector('.msg-ai-text');
+      renderWithTerms(textEl, data.reply, usedTerms);
       const tag = statusTag(data.label);
-      if (tag) div.insertBefore(tag, div.querySelector('.msg-ai-text'));
-      appendVerdictDetails(div, data);
+      if (tag) div.insertBefore(tag, textEl);
+      appendVerdictDetails(div, data, usedTerms);
+      citations = tag && Array.isArray(data.citations) ? data.citations : [];
     }
+
+    // Pills close the message: a verdict names its data sources, and any defined term gets the glossary pill beside them.
+    const pills = citationRow(citations, usedTerms);
+    if (pills) div.appendChild(pills);
 
     if (Array.isArray(data.quick_replies) && data.quick_replies.length > 0) {
       const quickReplies = document.createElement('div');
@@ -554,6 +776,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return appendAiMsg('Thinking…', 'msg-pending');
   }
 
+  // While the answer is being worked out, ask the server what it is doing and show that in the pending bubble. Returns a function that stops the polling.
+  function startStatusPolling(pending) {
+    const label = pending.querySelector('.msg-ai-text');
+    let stopped = false;
+    let timer = null;
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch(CHAT_STATUS_URL);
+        if (res.ok && !stopped) {
+          const data = await res.json();
+          if (data.status && label) label.textContent = data.status + '…';
+        }
+      } catch (err) {
+        // Status is cosmetic. The bubble keeps its last text.
+      }
+      if (!stopped) timer = setTimeout(poll, 400);
+    }
+
+    timer = setTimeout(poll, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
   function appendErrorMsg(title, text) {
     appendAiMsg(text, 'msg-error', title);
   }
@@ -572,14 +821,17 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInput.disabled = true;
     sending = true;
     const pending = appendPendingMsg();
+    let stopStatus = () => {};
 
     try {
       await sessionReady;
+      stopStatus = startStatusPolling(pending);
       const res = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
+      stopStatus();
       pending.remove();
 
       if (!res.ok) {
@@ -594,6 +846,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       appendReply(data);
     } catch (err) {
+      stopStatus();
       pending.remove();
       appendErrorMsg(
         'Connection issue',
@@ -620,7 +873,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
 
-  document.addEventListener('mouseover', (e) => {
+  function showTermTip(e) {
     const term = e.target.closest('.term');
     if (!term) return;
     const tooltip = term.querySelector('.term-tooltip');
@@ -639,11 +892,16 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       tooltip.style.top = (rect.top - tooltipRect.height - 8) + 'px';
     }
-  });
-  document.addEventListener('mouseout', (e) => {
+  }
+  function hideTermTip(e) {
     const term = e.target.closest('.term');
     if (!term) return;
     const tooltip = term.querySelector('.term-tooltip');
     if (tooltip) tooltip.classList.remove('visible');
-  });
+  }
+  document.addEventListener('mouseover', showTermTip);
+  document.addEventListener('mouseout', hideTermTip);
+  // Keyboard users get the same tip when a term takes focus.
+  document.addEventListener('focusin', showTermTip);
+  document.addEventListener('focusout', hideTermTip);
 });

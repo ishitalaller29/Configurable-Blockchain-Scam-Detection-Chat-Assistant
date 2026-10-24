@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,8 +28,12 @@ from config import (AGENT_KEYS, FUNCTIONAL_PROVIDERS, LLM_CONFIG,
 from config_loader import (ConfigError, get_active_detector, list_detectors,
                            set_active_detector)
 from conversation import ChatSession
+from detector.wrapper_source import ADDED_PREFIX, SourceError, register_wrapper
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+# The Detector API Wrapper's Docker setup (its Dockerfile, docker-compose.yml, .env.example and source), as a ZIP of the wrapper repo's develop branch.
+WRAPPER_TEMPLATE_PATH = (Path(__file__).resolve().parent / "downloads" /
+                         "detector-api-wrapper-template.zip")
 
 app = FastAPI(title="Scam-Detection Chat Assistant API")
 
@@ -45,12 +49,25 @@ _ba_provider = build_provider_for_agent("business_analyser", _agent_config)
 _sc_provider = build_provider_for_agent("scam_checker", _agent_config)
 
 
+# What the assistant is doing right now, shown in the chat's thinking bubble. The page polls GET /chat/status while it waits for POST /chat. Empty when idle.
+_status_text = ""
+_status_lock = threading.Lock()
+
+
+def _set_status(message: str) -> None:
+    global _status_text
+    with _status_lock:
+        _status_text = message
+
+
 def _new_session() -> ChatSession:
-    return ChatSession(_ba_provider,
-                       temperature=LLM_CONFIG["temperature"],
-                       max_tokens=LLM_CONFIG["max_tokens"],
-                       ba_provider=_ba_provider,
-                       sc_provider=_sc_provider)
+    session = ChatSession(_ba_provider,
+                          temperature=LLM_CONFIG["temperature"],
+                          max_tokens=LLM_CONFIG["max_tokens"],
+                          ba_provider=_ba_provider,
+                          sc_provider=_sc_provider)
+    session.on_status = _set_status
+    return session
 
 
 _session = _new_session()
@@ -66,6 +83,12 @@ class Evidence(BaseModel):
     weight: float
 
 
+class Citation(BaseModel):
+    # A data source a verdict drew on. url is where the reader can see the same data, or None when there is no page for it.
+    name: str
+    url: Optional[str] = None
+
+
 class AddressResult(BaseModel):
     input: str
     input_type: str
@@ -78,6 +101,7 @@ class AddressResult(BaseModel):
     source: Optional[str] = None
     detector_name: Optional[str] = None
     missing_fields: List[str] = []
+    citations: List[Citation] = []
 
 
 def _evidence(det) -> List[Evidence]:
@@ -104,6 +128,11 @@ class ChatResponse(BaseModel):
     clarifying_questions: List[str] = []
     # Optional quick-reply buttons displayed beneath the assistant response.
     quick_replies: List[str] = []
+    # Data sources behind the verdict (Etherscan, DexScreener), shown as citation pills. Empty when the reply carries no verdict.
+    citations: List[Citation] = []
+    # The user's expertise tier and use case as last worked out, null until known. The page uses the tier to decide how many jargon definitions to show.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
     # The raw identifiers the data sources returned for this reply (see raw_data.py): {chain, queried_address, sources, items: [{type, value, field, source}]}. Null when the message wasn't about an address. type is transaction_hash, contract_address, wallet_address, account_address, address or block_hash.
     raw_data: Optional[dict] = None
     results: List[AddressResult] = []
@@ -112,8 +141,12 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    with _session_lock:
-        turn = _session.handle_message(req.message)
+    _set_status("")
+    try:
+        with _session_lock:
+            turn = _session.handle_message(req.message)
+    finally:
+        _set_status("")
 
     ba = turn.ba_output
     det = turn.detection_result
@@ -130,6 +163,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         missing_fields=turn.missing_fields,
         clarifying_questions=turn.clarifying_questions,
         quick_replies=turn.quick_replies,
+        citations=[Citation(**c) for c in turn.citations],
+        expertise_tier=turn.expertise_tier,
+        use_case=turn.use_case,
         raw_data=turn.raw_data,
         results=[
             AddressResult(
@@ -146,10 +182,22 @@ def chat(req: ChatRequest) -> ChatResponse:
                 source=c.detection_source,
                 detector_name=c.detector_name,
                 missing_fields=c.missing_fields,
+                citations=[Citation(**x) for x in c.citations],
             ) for c in turn.address_checks
         ],
         skipped_inputs=turn.skipped_inputs,
     )
+
+
+class StatusResponse(BaseModel):
+    status: str
+
+
+@app.get("/chat/status", response_model=StatusResponse)
+def chat_status() -> StatusResponse:
+    # Not behind _session_lock, so it answers while /chat is still running.
+    with _status_lock:
+        return StatusResponse(status=_status_text)
 
 
 class SessionResetResponse(BaseModel):
@@ -226,8 +274,13 @@ def update_llm_config(req: LLMConfigUpdateRequest) -> LLMConfigResponse:
     )
 
 
-# Active detector dropdown. Only the four real detectors are offered
+# Active detector dropdown. Only the four real detectors are offered, plus any wrapper the user added with "+ add source".
 SELECTABLE_DETECTORS = ("rektradar", "ethxpose", "honeypotscan", "recon")
+
+
+def _is_selectable(detector_id: str) -> bool:
+    return (detector_id in SELECTABLE_DETECTORS
+            or detector_id.startswith(ADDED_PREFIX))
 
 
 class DetectorChoice(BaseModel):
@@ -255,7 +308,7 @@ def _detector_config_response() -> DetectorConfigResponse:
         active_detector=active[0] if active else None,
         detectors=[
             DetectorChoice(**d) for d in list_detectors()
-            if d["id"] in SELECTABLE_DETECTORS
+            if _is_selectable(d["id"])
         ],
         env_override=bool(os.environ.get("ACTIVE_DETECTOR")),
     )
@@ -270,7 +323,7 @@ def get_detector_config() -> DetectorConfigResponse:
 def update_detector_config(
         req: DetectorConfigUpdateRequest) -> DetectorConfigResponse:
     detector_id = req.active_detector
-    if detector_id is not None and detector_id not in SELECTABLE_DETECTORS:
+    if detector_id is not None and not _is_selectable(detector_id):
         raise HTTPException(status_code=400,
                             detail=f"Unknown detector '{detector_id}'")
     try:
@@ -284,6 +337,44 @@ def update_detector_config(
         _session = _new_session()
 
     return _detector_config_response()
+
+
+class AddSourceRequest(BaseModel):
+    name: str
+    # Address of a running Detector API Wrapper, e.g. http://localhost:8002
+    url: str
+
+
+class AddSourceResponse(BaseModel):
+    added: DetectorChoice
+    config: DetectorConfigResponse
+
+
+@app.post("/admin/sources", response_model=AddSourceResponse)
+def add_source(req: AddSourceRequest) -> AddSourceResponse:
+    try:
+        entry = register_wrapper(req.name, req.url)
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AddSourceResponse(
+        added=DetectorChoice(id=entry["id"],
+                             name=entry["name"],
+                             status=entry["status"],
+                             is_llm_based=entry["is_llm_based"]),
+        config=_detector_config_response())
+
+
+@app.get("/admin/wrapper-template")
+def download_wrapper_template() -> FileResponse:
+    if not WRAPPER_TEMPLATE_PATH.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The API wrapper template isn't on this server yet. Ask "
+            "whoever runs it to add downloads/"
+            "detector-api-wrapper-template.zip.")
+    return FileResponse(WRAPPER_TEMPLATE_PATH,
+                        media_type="application/zip",
+                        filename=WRAPPER_TEMPLATE_PATH.name)
 
 
 @app.get("/", include_in_schema=False)

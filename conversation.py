@@ -1,6 +1,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents.business_analyser import BusinessAnalyser
@@ -9,7 +10,8 @@ from agents.scam_checker import ScamChecker
 from config_loader import get_active_detector
 from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
                                 run_detector)
-from fetchers.context_builder import (FETCHERS, STATUS_FAILED, missing_fields)
+from fetchers.context_builder import (FETCHERS, STATUS_FAILED, citations,
+                                      missing_fields)
 from fetchers.etherscan import (ADDRESS_RE, TX_HASH_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
@@ -422,6 +424,7 @@ class AddressCheck:
     clarifying_questions: List[str] = field(default_factory=list)
     ask_for: Optional[Tuple[str, str]] = None
     notes_for: Optional[Tuple[str, str]] = None
+    citations: List[Dict[str, Optional[str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -437,6 +440,11 @@ class TurnResult:
     clarifying_questions: List[str] = field(default_factory=list)
     # Optional buttons shown beneath the assistant response.
     quick_replies: List[str] = field(default_factory=list)
+    # The data sources a verdict drew on ({"name", "url"}), for the citation pills.
+    citations: List[Dict[str, Optional[str]]] = field(default_factory=list)
+    # The user's expertise tier and use case as last worked out, so the page can match its jargon help to the tier.
+    expertise_tier: Optional[str] = None
+    use_case: Optional[str] = None
     # The identifiers (tx hashes, contract/wallet/account addresses) the data sources returned for this turn, for the page to display. See raw_data.py.
     raw_data: Optional[Dict] = None
     address_checks: List[AddressCheck] = field(default_factory=list)
@@ -488,6 +496,11 @@ class ChatSession:
         self._awaiting_profile_clarification = False
         self._profile: Optional[Tuple[str, str]] = None
         self._pending_request: Optional[str] = None
+        # Last expertise tier and use case the Business Analyser worked out. It may leave them null on a later turn, but the user's level hasn't changed, so keep applying the last known values.
+        self.expertise_tier: Optional[str] = None
+        self.use_case: Optional[str] = None
+        # Live status for the chat's thinking bubble. The server swaps in a function that stores the text. It is a no-op everywhere else.
+        self.on_status: Callable[[str], None] = lambda message: None
         # What this turn fetched, for raw_data on the reply: the address context, and a configured detector's raw reply as (name, JSON).
         self._turn_context: Optional[AddressContext] = None
         self._turn_detector_reply: Optional[Tuple[str, Any]] = None
@@ -503,6 +516,12 @@ class ChatSession:
         if window and window[0]["role"] == "assistant":
             window = window[1:]
         return window
+
+    def _status(self, message: str) -> None:
+        try:
+            self.on_status(message)
+        except Exception:
+            logger.debug("status callback failed", exc_info=True)
 
     def handle_message(self, user_text: str) -> TurnResult:
         self._remember("user", user_text)
@@ -520,9 +539,11 @@ class ChatSession:
         # Returns (context, None), or (None, reply) when the lookup failed before any context could be built. Per-fetcher failures don't land here. They come back inside the context as missing fields.
         chain = ba_output.chain or "ethereum"
         try:
-            context = get_address_context(ba_output, requested_fields)
+            context = get_address_context(ba_output, requested_fields,
+                                          self._status)
             self._turn_context = context
             return context, None
+        
         except Exception as e:
             logger.warning("lookup for %s failed: %s", ba_output.raw_input,
                            type(e).__name__)
@@ -554,6 +575,7 @@ class ChatSession:
                                ba_output.raw_input, type(e).__name__)
                 return _lookup_error_reply(e, chain), None, missing
 
+        self._status(f"Comparing the address against {config.name}")
         self._turn_address = address
         outcome = run_detector(config, address, chain, context)
         if outcome.raw_reply is not None:
@@ -588,6 +610,7 @@ class ChatSession:
         self._turn_detector_reply = None
         self._turn_address = None
 
+        self._status("Reading your message")
         ba_output = self.ba.analyse(self._send_window())
 
         picked = _PROFILE_FALLBACK_PROFILES.get(user_text.strip())
@@ -605,6 +628,10 @@ class ChatSession:
                     "expertise_tier": ba_output.expertise_tier or tier,
                     "use_case": ba_output.use_case or use_case,
                 })
+        if ba_output.expertise_tier:
+            self.expertise_tier = ba_output.expertise_tier
+        if ba_output.use_case:
+            self.use_case = ba_output.use_case
 
         if ba_output.needs_clarification:
             if self._awaiting_profile_clarification:
@@ -631,6 +658,8 @@ class ChatSession:
                 reply=reply,
                 ba_output=ba_output,
                 quick_replies=quick_replies,
+                expertise_tier=self.expertise_tier,
+                use_case=self.use_case,
             )
 
         self._awaiting_profile_clarification = False
@@ -644,6 +673,7 @@ class ChatSession:
 
         detection_result = None
         detection_source = None
+        cited: List[Dict[str, Optional[str]]] = []
         detector_name = None
         missing: List[str] = []
         questions: List[str] = []
@@ -684,6 +714,7 @@ class ChatSession:
             questions = check.clarifying_questions
             ask_for = check.ask_for
             notes_for = check.notes_for
+            cited = check.citations
 
         self._pending_request = None
         if notes_for is not None:
@@ -716,6 +747,9 @@ class ChatSession:
                           detector_name=detector_name,
                           missing_fields=missing,
                           clarifying_questions=questions,
+                          citations=cited,
+                          expertise_tier=self.expertise_tier,
+                          use_case=self.use_case,
                           raw_data=raw_data,
                           address_checks=address_checks,
                           skipped_inputs=[raw.value for raw in skipped])
@@ -761,10 +795,24 @@ class ChatSession:
             check.reply = _no_data_reply(context)
             questions = _fallback_questions(context)
         else:
-            result, questions = self.sc.check(context, notes)
+            self._status("Analysing the evidence")
+            result, questions = self.sc.check(context,
+                                              notes,
+                                              expertise_tier=self.expertise_tier,
+                                              use_case=self.use_case)
             print(">>> SCAM CHECKER RAN", flush=True)
-            check.detection_result = result
             check.detection_source = SOURCE_SCAM_CHECKER
+            # Only a reply that carries a verdict cites its sources.
+            check.citations = citations(context)
+            # 3-agent pipeline: BA -> Scam Checker -> Forensic
+            # Investigator. Falls back to the Scam Checker's own
+            # explanation if the investigator fails.
+            self._status("Writing the explanation")
+            result = self.fi.explain(result,
+                                     context,
+                                     expertise_tier=self.expertise_tier,
+                                     use_case=self.use_case)
+            check.detection_result = result
             check.reply = summarize_detection(result)
             if result.label == "insufficient_evidence":
                 questions = questions or _fallback_questions(context)
