@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.business_analyser import BusinessAnalyser
 from agents.forensic_investigator import ForensicInvestigator
 from agents.scam_checker import ScamChecker
-from config_loader import get_active_detector
+from config_loader import DataSourceDisabledError, get_active_detector
 from detector.connector import (ERROR_CONFIG, ERROR_REJECTED, DetectorOutcome,
                                 run_detector)
-from fetchers.context_builder import (FETCHERS, STATUS_FAILED, citations,
-                                      missing_fields)
+from fetchers.context_builder import (FETCHERS, STATUS_DISABLED, STATUS_FAILED,
+                                      citations, missing_fields)
 from fetchers.etherscan import (ADDRESS_RE, TX_HASH_RE, InvalidInputError,
                                 UnsupportedChainError)
 from fetchers.fetcher_output import (get_address_context, is_supported,
@@ -117,6 +117,11 @@ def _lookup_error_reply(error: Exception, chain: str) -> str:
         return (f"I can only look things up on Ethereum right now, so I "
                 f"can't check it on {_chain_name(chain)}. Is it actually on "
                 "Ethereum? If so, let me know and I'll take a look.")
+    if isinstance(error, DataSourceDisabledError):
+        return ("I can only look up a transaction hash through Etherscan, "
+                "and it's switched off right now, so I can't tell which "
+                "address that transaction belongs to. Could you paste the "
+                "address you're worried about instead?")
     if isinstance(error, TxNotFoundError):
         return ("I couldn't find that transaction on Ethereum - it may be "
                 "mistyped, still pending, or on another chain. Could you "
@@ -408,6 +413,9 @@ def _say_missing(field: str, status: str) -> str:
     if status == STATUS_FAILED:
         return (f"I couldn't pull its {words} just now - the data source "
                 "didn't come through, so I can't say either way.")
+    if status == STATUS_DISABLED:
+        return (f"I didn't look up its {words} - that data source is "
+                "switched off right now, so I can't say either way.")
     return (f"I can't look up {words} yet - there's no data source hooked "
             "up for that.")
 

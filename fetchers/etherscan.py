@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 import requests
 
-from config_loader import get_data_source, resolve_secret
+from config_loader import (check_data_source_active, get_data_source,
+                           resolve_secret)
 
 SOURCE_ID = "etherscan"
 SUPPORTED_CHAIN = "ethereum"
@@ -115,6 +116,7 @@ def etherscan_request(module: str, action: str, **params):
     # Shared entry point for every Etherscan v2 call.
 
     _validate(params)
+    check_data_source_active(SOURCE_ID)
     source = get_data_source(SOURCE_ID)
     api_key = resolve_secret(
         source.api_key)  # fails fast if ETHERSCAN_API_KEY is missing

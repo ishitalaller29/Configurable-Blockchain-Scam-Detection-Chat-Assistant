@@ -4,7 +4,8 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
 
-from config_loader import ConfigError, get_cache_settings
+from config_loader import (ConfigError, data_source_for_fetcher,
+                           get_cache_settings, is_data_source_active)
 from fetchers.contract_fetcher import fetch_contract_info
 from fetchers.etherscan import (ADDRESS_RE, EtherscanError, InvalidInputError,
                                 check_chain)
@@ -49,6 +50,7 @@ PROGRESS_TEXT = {
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"  # the fetcher ran and errored
 STATUS_UNAVAILABLE = "unavailable"  # no data source for it yet (stub)
+STATUS_DISABLED = "disabled"
 
 _cache: dict = {}
 
@@ -104,6 +106,17 @@ def build_address_context(
 
     for field in wanted:
         fetcher_id, fn = FETCHERS[field]
+        source_id = data_source_for_fetcher(fetcher_id)
+        if source_id and not is_data_source_active(source_id):
+            logger.info("%s skipped - %s is switched off", fetcher_id,
+                        source_id)
+            provenance[fetcher_id] = {
+                "fields": [field],
+                "source": source_id,
+                "status": STATUS_DISABLED,
+                "error": f"{source_id} is switched off",
+            }
+            continue
         if progress is not None:
             progress(PROGRESS_TEXT.get(field, f"Checking {field}"))
         # Each fetcher fails on its own: a failure is recorded in provenance and the rest still run, so the agents get whatever partial context there is.
@@ -113,6 +126,7 @@ def build_address_context(
             logger.info("%s skipped - no data source decided yet", fetcher_id)
             provenance[fetcher_id] = {
                 "fields": [field],
+                "source": source_id,
                 "status": STATUS_UNAVAILABLE,
                 "error": "no data source hooked up yet",
             }
@@ -123,6 +137,7 @@ def build_address_context(
             logger.warning("%s failed: %s", fetcher_id, _safe_error(e))
             provenance[fetcher_id] = {
                 "fields": [field],
+                "source": source_id,
                 "status": STATUS_FAILED,
                 "error": _safe_error(e),
             }
@@ -131,6 +146,7 @@ def build_address_context(
         context[field] = value
         provenance[fetcher_id] = {
             "fields": [field],
+            "source": source_id,
             "status": STATUS_OK,
             "fetched_at": fetched_at,
         }

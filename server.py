@@ -25,8 +25,9 @@ from typing import Dict
 from config import (AGENT_KEYS, FUNCTIONAL_PROVIDERS, LLM_CONFIG,
                     SUPPORTED_PROVIDERS, build_provider_for_agent,
                     load_agent_config, save_agent_config)
-from config_loader import (ConfigError, get_active_detector, list_detectors,
-                           set_active_detector)
+from config_loader import (ConfigError, get_active_detector,
+                           list_data_sources, list_detectors,
+                           set_active_data_sources, set_active_detector)
 from conversation import ChatSession
 from detector.wrapper_source import ADDED_PREFIX, SourceError, register_wrapper
 
@@ -375,6 +376,44 @@ def download_wrapper_template() -> FileResponse:
     return FileResponse(WRAPPER_TEMPLATE_PATH,
                         media_type="application/zip",
                         filename=WRAPPER_TEMPLATE_PATH.name)
+
+
+class DataSourceChoice(BaseModel):
+    id: str
+    name: str
+    active: bool
+
+
+class DataSourcesResponse(BaseModel):
+    data_sources: List[DataSourceChoice]
+
+
+class DataSourcesUpdateRequest(BaseModel):
+    active_data_sources: List[str]
+
+
+def _data_sources_response() -> DataSourcesResponse:
+    return DataSourcesResponse(
+        data_sources=[DataSourceChoice(**s) for s in list_data_sources()])
+
+
+@app.get("/admin/data-sources", response_model=DataSourcesResponse)
+def get_data_sources() -> DataSourcesResponse:
+    return _data_sources_response()
+
+
+@app.post("/admin/data-sources", response_model=DataSourcesResponse)
+def update_data_sources(req: DataSourcesUpdateRequest) -> DataSourcesResponse:
+    try:
+        set_active_data_sources(req.active_data_sources)
+    except ConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    global _session
+    with _session_lock:
+        _session = _new_session()
+
+    return _data_sources_response()
 
 
 @app.get("/", include_in_schema=False)

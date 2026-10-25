@@ -35,14 +35,8 @@
           <div class="sidebar-label-row">
             <p class="sidebar-label">Connected sources</p>
           </div>
-          <div class="source-item active" data-source="Etherscan API" tabindex="0">
-            Etherscan API
-            <span class="source-dot"></span>
-          </div>
-          <div class="source-item" data-source="DexScreener API" tabindex="0">
-            DexScreener API
-            <span class="source-dot"></span>
-          </div>
+          <div id="dataSourceList"></div>
+          <p class="step-note" id="dataSourceStatus"></p>
           <button class="add-source" id="addSourceBtn">+ add source</button>
           <form class="add-source-form" id="addSourceForm" style="display:none;" autocomplete="off">
             <label class="form-label" for="sourceNameInput">Name</label>
