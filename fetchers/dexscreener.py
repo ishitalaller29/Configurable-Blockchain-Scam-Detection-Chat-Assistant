@@ -7,6 +7,9 @@ from typing import Any, Optional
 
 import requests
 
+from config_loader import check_data_source_active
+
+SOURCE_ID = "dexscreener"
 BASE_URL = "https://api.dexscreener.com"
 REQUEST_TIMEOUT = 10
 MAX_REQUESTS_PER_MIN = 300
@@ -31,6 +34,7 @@ def _throttle() -> None:
         _last_request_time = time.monotonic()
 
 def _get(path: str, params: Optional[dict] = None) -> Any:
+    check_data_source_active(SOURCE_ID)
     url = f"{BASE_URL}{path}"
     for attempt in range(MAX_RETRIES):
         _throttle()

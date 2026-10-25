@@ -290,6 +290,24 @@ body {
 .source-item.active .source-dot {
   background: #1f3a5f;
 }
+
+button.source-item {
+  width: 100%;
+  font-family: inherit;
+  text-align: left;
+}
+
+.source-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #97a0a8;
+}
+
+.source-item.active .source-state {
+  color: #1f3a5f;
+}
  
 .add-source {
   font-size: 13px;

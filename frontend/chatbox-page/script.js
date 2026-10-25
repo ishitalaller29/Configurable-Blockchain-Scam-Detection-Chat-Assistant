@@ -29,6 +29,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
   const detectorSelect = document.getElementById('detectorSelect');
   const detectorStatus = document.getElementById('detectorStatus');
+  const dataSourceList = document.getElementById('dataSourceList');
+  const dataSourceStatus = document.getElementById('dataSourceStatus');
 
   function cloneTemplate(template) {
     return template.content.firstElementChild.cloneNode(true);
@@ -54,11 +56,83 @@ document.addEventListener('DOMContentLoaded', () => {
     plusIcon._noteTimer = setTimeout(() => { attachNote.hidden = true; }, 4000);
   });
 
+  function clearThread() {
+    thread.innerHTML = '';
+    thread.appendChild(promptHint);
+    promptHint.style.display = '';
+  }
+
   // ---------- Connected sources (admin sidebar) ----------
+  const DATA_SOURCES_URL = API_BASE + '/admin/data-sources';
+  let dataSourcesState = null;
+
+  function renderDataSources(data) {
+    dataSourcesState = data;
+    dataSourceList.innerHTML = '';
+    data.data_sources.forEach(source => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'source-item' + (source.active ? ' active' : '');
+      item.dataset.sourceId = source.id;
+      item.setAttribute('aria-pressed', String(source.active));
+      item.title = (source.active ? 'On - click to stop calling ' : 'Off - click to start calling ') + source.name;
+      item.textContent = source.name + ' API';
+      const state = document.createElement('span');
+      state.className = 'source-state';
+      state.textContent = source.active ? 'On' : 'Off';
+      const dot = document.createElement('span');
+      dot.className = 'source-dot';
+      state.appendChild(dot);
+      item.appendChild(state);
+      dataSourceList.appendChild(item);
+    });
+  }
+
+  async function loadDataSources() {
+    try {
+      const res = await fetch(DATA_SOURCES_URL);
+      if (!res.ok) throw new Error('bad status');
+      renderDataSources(await res.json());
+      dataSourceStatus.textContent = '';
+    } catch (err) {
+      dataSourceStatus.textContent = 'Could not load data sources from the server.';
+    }
+  }
+
+  dataSourceList.addEventListener('click', async (e) => {
+    const item = e.target.closest('.source-item');
+    if (!item || !dataSourcesState) return;
+    const id = item.dataset.sourceId;
+    const active = dataSourcesState.data_sources.filter(s => s.active).map(s => s.id);
+    const next = active.includes(id) ? active.filter(s => s !== id) : [...active, id];
+    if (!next.length) {
+      dataSourceStatus.textContent = 'At least one data source has to stay on.';
+      return;
+    }
+
+    dataSourceStatus.textContent = 'Saving…';
+    try {
+      const res = await fetch(DATA_SOURCES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active_data_sources: next }),
+      });
+      if (!res.ok) throw new Error('bad status');
+      renderDataSources(await res.json());
+      clearThread();
+      dataSourceStatus.textContent = 'Saved - new conversation started.';
+    } catch (err) {
+      dataSourceStatus.textContent = 'Failed to change data sources.';
+      loadDataSources();
+    }
+  });
+
   sidebar.addEventListener('click', (e) => {
     const item = e.target.closest('.source-item');
-    if (!item) return;
-    sidebar.querySelectorAll('.source-item').forEach(i => i.classList.remove('active'));
+    if (!item || dataSourceList.contains(item)) return;
+    sidebar.querySelectorAll('.source-item').forEach(i => {
+      if (!dataSourceList.contains(i)) i.classList.remove('active');
+    });
     item.classList.add('active');
   });
 
@@ -184,6 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
     adminBtn.setAttribute('aria-pressed', String(on));
     adminBtnLabel.textContent = on ? 'Admin (exit)' : 'Admin';
     if (on) {
+      loadDataSources();
       loadLlmConfig();
       loadDetectorConfig();
     }
@@ -388,9 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         if (!res.ok) throw new Error('bad status');
         renderDetectorConfig(await res.json());
-        thread.innerHTML = '';
-        thread.appendChild(promptHint);
-        promptHint.style.display = '';
+        clearThread();
         if (detectorStatus) detectorStatus.textContent = 'Saved - new conversation started.';
       } catch (err) {
         if (detectorStatus) detectorStatus.textContent = 'Failed to change detector.';

@@ -25,6 +25,10 @@ class ConfigError(Exception):
     pass
 
 
+class DataSourceDisabledError(ConfigError):
+    pass
+
+
 class RateLimit(BaseModel):
     calls_per_second: int = Field(gt=0)
     calls_per_day: int = Field(gt=0)
@@ -32,6 +36,7 @@ class RateLimit(BaseModel):
 
 class DataSource(BaseModel):
     id: str
+    name: Optional[str] = None
     status: Literal["stub", "planned", "blocked", "live"]
     base_url: Optional[str] = None
     chain_id: Optional[int] = None
@@ -115,6 +120,72 @@ def get_data_source(source_id: str, path: Path = CONFIG_PATH) -> DataSource:
     if not source.base_url:
         raise ConfigError(f"Data source '{source_id}' has no base_url")
     return source
+
+
+def _live_data_sources(path: Path) -> List[dict]:
+    return [
+        e for e in load_config(path).get("data_sources", [])
+        if e.get("status") == "live"
+    ]
+
+
+def get_active_data_sources(path: Path = CONFIG_PATH) -> List[str]:
+    live = [e.get("id") for e in _live_data_sources(path)]
+    chosen = load_config(path).get("active_data_sources")
+    if chosen is None:
+        return live
+    return [source_id for source_id in live if source_id in chosen]
+
+
+def is_data_source_active(source_id: str, path: Path = CONFIG_PATH) -> bool:
+    return source_id in get_active_data_sources(path)
+
+
+def check_data_source_active(source_id: str,
+                             path: Path = CONFIG_PATH) -> None:
+    if not is_data_source_active(source_id, path):
+        raise DataSourceDisabledError(
+            f"Data source '{source_id}' is switched off in the admin panel")
+
+
+def list_data_sources(path: Path = CONFIG_PATH) -> List[dict]:
+    active = get_active_data_sources(path)
+    return [{
+        "id": e.get("id"),
+        "name": e.get("name") or e.get("id"),
+        "active": e.get("id") in active,
+    } for e in _live_data_sources(path)]
+
+
+def data_source_for_fetcher(fetcher_id: str,
+                            path: Path = CONFIG_PATH) -> Optional[str]:
+    entry = next((e for e in load_config(path).get("fetchers", [])
+                  if e.get("id") == fetcher_id), None)
+    return entry.get("data_source") if entry else None
+
+
+_ACTIVE_DATA_SOURCES_LINE = re.compile(
+    r'^(\s*"active_data_sources":\s*)\[[^\]\n]*\]', re.M)
+
+
+def set_active_data_sources(source_ids: List[str],
+                            path: Path = CONFIG_PATH) -> None:
+    live = [e.get("id") for e in _live_data_sources(path)]
+    unknown = [s for s in source_ids if s not in live]
+    if unknown:
+        raise ConfigError(f"Unknown data source(s): {', '.join(unknown)} "
+                          f"(known: {', '.join(live) or 'none'})")
+    if not source_ids:
+        raise ConfigError("At least one data source has to stay on")
+    chosen = [s for s in live if s in source_ids]
+    text = Path(path).read_text()
+    new_text, count = _ACTIVE_DATA_SOURCES_LINE.subn(
+        lambda m: m.group(1) + json.dumps(chosen), text, count=1)
+    if count == 0:
+        raise ConfigError(
+            f"No one-line active_data_sources key in {path}")
+    Path(path).write_text(new_text)
+    load_config.cache_clear()
 
 
 def get_cache_settings(path: Path = CONFIG_PATH) -> CacheSettings:
