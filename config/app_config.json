@@ -1,0 +1,502 @@
+{
+  "//": "Server-side config store: API configs, connectors and the fetcher plan. Week 1 is structure only",
+  "//keys": "A key starting with // is a comment; the loader skips it. A '//calls' block holds a fetcher's planned calls - inert until the prefix is dropped. 'env:NAME' is read from the environment at call time, never a committed secret. {{ ... }} tokens are substituted at call time. status: stub | planned | blocked | live.",
+  "llm_backends": [
+    {
+      "//": "Chatbot runs locally, so Ollama is the only AI backend. Reached over its OpenAI-compatible endpoint, so llm_providers/openai_compatible.py serves it.",
+      "//migration": "Currently built in config.py from OLLAMA_BASE_URL / OLLAMA_MODEL. ",
+      "id": "ollama",
+      "provider": "openai_compatible",
+      "status": "live",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "not-needed",
+      "model": "llama3.1"
+    }
+  ],
+  "agents": [
+    {
+      "//": "Three agents, one backend, a separate system prompt each - routing, judging evidence and explaining someone else's output are different jobs. Prompts live with the agent code; only selection and sampling are config.",
+      "id": "business_analyser",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "live",
+      "implementation": "agents/business_analyser.py",
+      "temperature": 0.3,
+      "max_tokens": 800,
+      "frequency_penalty": 0.3,
+      "job": "Scope gating, request-type classification, input extraction, deciding what downstream work is needed.",
+      "//detector_visibility": "Reads only required_input_type and detector_configured. Never auth/request/response_mapping, never branches on mode; its output has no mode field."
+    },
+    {
+      "id": "scam_checker",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "live",
+      "implementation": "agents/scam_checker.py",
+      "temperature": 0.3,
+      "max_tokens": 800,
+      "frequency_penalty": 0.5,
+      "job": "Judges scam_check from AddressContext when no detector is configured. Returns detection and explanation together, so the Forensic Investigator never runs here."
+    },
+    {
+      "id": "forensic_investigator",
+      "backend": "ollama",
+      "prompt_strategy": "zero_shot",
+      "status": "stub",
+      "implementation": null,
+      "temperature": null,
+      "max_tokens": null,
+      "frequency_penalty": null,
+      "job": "Explains a configured detector's evidence in plain language. Runs only when a detector is configured and is_llm_based is false.",
+      "//faithfulness": "Translation, not a second opinion. It must not re-judge, so a wrong value_map below becomes a confidently wrong explanation."
+    }
+  ],
+  "active_detector": null,
+  "//active_detector": "null = none configured, so scam_check falls through to the Scam Checker. That is what agents/business_analyser.py hardcodes today. Set to an id below to flip detector_configured true.",
+  "active_data_sources": ["etherscan", "dexscreener"],
+  "detectors": [
+    {
+      "id": "rektradar",
+      "name": "RektRadar",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "https://api.rektradar.io/v1/token/{{ address }}",
+      "method": "GET",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": 10,
+      "//timeout": "Connector's job, not the mapping layer's. Timeouts and 4xx/5xx fail the same way, without running any mapping.",
+      "//auth": "Free tier is anonymous and needs no key (data is ~10 min behind). optional: true sends the key when REKTRADAR_API_KEY is set and calls anonymously when it isn't.",
+      "auth": { "type": "header", "header_name": "X-API-Key", "value_template": "{api_key}", "api_key": "env:REKTRADAR_API_KEY", "optional": true },
+      "request": {
+        "body_template": {}
+      },
+      "response_mapping": {
+        "label": {
+          "//": "Score is numeric, not a word, so ranges derive the enum; first match wins. Fallback covers 40-69 and flags containing insufficient_data.",
+          "path": "$.score",
+          "overrides": [
+            { "path": "$.flags", "contains": ["insufficient_data"], "value": "insufficient_evidence" },
+            { "path": "$.analyzed", "equals": false, "value": "insufficient_evidence" }
+          ],
+          "ranges": [
+            { "gte": 70, "value": "scam" },
+            { "lt": 40, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "//": "score is a 0-100 risk, so 'risk' turns it into confidence in the label: scam = score, not_scam = 100 - score. Present-but-non-numeric is a MappingError, not a silent default.",
+          "path": "$.score",
+          "scale": 100,
+          "measures": "risk"
+        },
+        "evidence": {
+          "//": "Unknown code -> {description: raw code, weight: default_weight}.",
+          "mode": "code_list",
+          "list_path": "$.flags",
+          "default_weight": 0.3,
+          "codes": {
+            "//source": "Descriptions are RektRadar's own one-line summary from https://rektradar.io/signals/<code>/",
+            "//catalog": "Holds every flag seen in live replies plus every danger and good flag in the catalog. Its other warning/info flags are left out on purpose - an unknown code still shows as the raw code at default_weight.",
+            "//danger": "RektRadar severity: danger",
+            "balance_zeroing_function": { "description": "A public function writes zero (or subtracts) directly into holder balances.", "weight": 0.95 },
+            "blacklisted_cluster": { "description": "The deployer's cluster has already been flagged for producing confirmed scams.", "weight": 0.95 },
+            "extreme_sell_fee": { "description": "Sell fee above 50% - borderline honeypot, the contract drains exits.", "weight": 0.95 },
+            "honeypot": { "description": "The token can be bought but cannot be sold - funds are trapped on-chain.", "weight": 0.95 },
+            "impersonates_major_token": { "description": "The contract spoofs the name or symbol of USDT, USDC, WETH or another major token at a fake address.", "weight": 0.95 },
+            "known_scam_bytecode": { "description": "The contract's bytecode is byte-identical to a confirmed mass-scam factory RektRadar has already flagged thousands of times.", "weight": 0.95 },
+            "liquidity_decreased": { "description": "More than 80% of the pair's WETH liquidity has been pulled since the initial analysis.", "weight": 0.95 },
+            "multi_flag_confirmed_scam": { "description": "Both rug-setup and malicious-contract evidence are present - a near-certain scam.", "weight": 0.95 },
+            "multi_flag_malicious_contract": { "description": "Two or more distinct malicious code patterns were found in the contract source or bytecode.", "weight": 0.95 },
+            "router_gated_balance_access": { "description": "Balance accounting branches on the router/pair address - sells behave differently than buys.", "weight": 0.95 },
+            "selfdestruct_create2_combo": { "description": "The contract can both self-destruct and redeploy to the same address - a metamorphic rug primitive.", "weight": 0.95 },
+            "sell_failed": { "description": "Buy succeeds but sell reverts - classic honeypot signature.", "weight": 0.95 },
+            "serial_scammer": { "description": "The deployer has multiple confirmed scam deploys - a known bad actor.", "weight": 0.95 },
+            "balance_manipulation": { "description": "The owner can directly rewrite arbitrary balances (setBalance-style functions).", "weight": 0.9 },
+            "deploys_scam_bytecode": { "description": "The deployer has a history of shipping contracts whose bytecode matches confirmed scams.", "weight": 0.9 },
+            "previous_scam_tokens": { "description": "The deployer has previously deployed tokens that RektRadar flagged as scams.", "weight": 0.9 },
+            "self_destruct": { "description": "The contract can selfdestruct - the token code can be erased from the chain.", "weight": 0.9 },
+            "serial_scammer_network": { "description": "The deployer is funded by, or funds, a known serial scammer - guilt by graph association.", "weight": 0.9 },
+            "approve_with_transfer": { "description": "The approve function also moves tokens - approvals should never transfer.", "weight": 0.85 },
+            "blacklist_detected": { "description": "The contract can blacklist any address from selling - a kill-list with no notice period.", "weight": 0.85 },
+            "buy_only_pattern": { "description": "On-chain history shows hundreds of buys and zero sells - telltale honeypot trace.", "weight": 0.85 },
+            "commented_renounce": { "description": "The renounceOwnership function is commented out in the source - renouncing was never an option.", "weight": 0.85 },
+            "extreme_hardcoded_sell_fee": { "description": "The verified source hardcodes a near-total sell tax (90%+), so selling burns almost the entire position.", "weight": 0.85 },
+            "fee_changed_post_launch": { "description": "Fee-update events fired after the initial analysis - launch taxes were a costume.", "weight": 0.85 },
+            "hardcoded_address_blacklist": { "description": "The transfer path reverts for specific addresses baked into the code.", "weight": 0.85 },
+            "hidden_owner": { "description": "The source keeps an owner address in a private variable - control survives a fake ownership renounce.", "weight": 0.85 },
+            "liquidity_removed": { "description": "Post-launch monitoring saw the pair's liquidity drop to zero - the rug has happened.", "weight": 0.85 },
+            "mass_deployer": { "description": "The wallet has deployed 200+ contracts - almost certainly an automated scam factory.", "weight": 0.85 },
+            "mass_hardcoded_blacklist": { "description": "The transfer path embeds many literal addresses followed by a revert - a baked-in ban list.", "weight": 0.85 },
+            "mixer_funded": { "description": "The deployer's ETH was sourced from Tornado Cash or another mixer.", "weight": 0.85 },
+            "multi_flag_rug_setup": { "description": "Three or more independent rug-pull ingredients fired on the same token at once.", "weight": 0.85 },
+            "ownership_reclaimed": { "description": "Ownership was renounced... then transferred back to a live address.", "weight": 0.85 },
+            "proxy_implementation_known_scam": { "description": "The implementation behind the proxy is byte-identical to a confirmed mass-scam factory.", "weight": 0.85 },
+            "proxy_implementation_missing": { "description": "The proxy delegatecalls into an address that currently holds no code - a trap or a not-yet-set logic.", "weight": 0.85 },
+            "reentrancy_risk": { "description": "External value calls happen before balance updates - the classic reentrancy shape.", "weight": 0.85 },
+            "sell_blocked": { "description": "Sells revert with an explicit guard - not a slippage issue, an intent.", "weight": 0.85 },
+            "slow_rug_detected": { "description": "Liquidity has been drained gradually - over half the peak WETH reserve is gone.", "weight": 0.85 },
+            "supply_inflated": { "description": "totalSupply grew more than 10% since the analysis - someone is minting.", "weight": 0.85 },
+            "trading_paused_post_launch": { "description": "The contract reports paused = true after launch - all exits are currently frozen.", "weight": 0.85 },
+            "tx_origin_msg_sender_check": { "description": "The contract explicitly blocks contract callers by requiring tx.origin to equal msg.sender.", "weight": 0.85 },
+            "creator_holds_all_lp": { "description": "The deployer wallet still owns 95%+ of the LP tokens - a one-tx rug is one click away.", "weight": 0.8 },
+            "name_mimics_known_token": { "description": "The name or symbol matches a popular token, but the contract address is different.", "weight": 0.8 },
+            "opcode_selfdestruct": { "description": "The contract can destroy itself, wiping its code and (with CREATE2) reincarnating as something else.", "weight": 0.8 },
+            "scam_factory_name": { "description": "The contract's internal name matches a template churned out by a known scam factory.", "weight": 0.8 },
+            "single_holder_above_90pct": { "description": "One wallet holds over 90% of the supply - total control of the float.", "weight": 0.8 },
+            "single_mint_concentrated": { "description": "All tokens were minted in one transaction to a single wallet - no fair launch.", "weight": 0.8 },
+            "unrestricted_mint": { "description": "A public mint() with no access guard - the supply can be inflated at will.", "weight": 0.8 },
+            "amount_dependent": { "description": "Selling small amounts works, large amounts fail - partial honeypot.", "weight": 0.75 },
+            "dynamic_fee_by_block": { "description": "Fees are computed from block.number or block.timestamp - taxes change on their own.", "weight": 0.75 },
+            "high_sell_fee": { "description": "Sell fee in the 30-50% range - soft rug, exits are economically unviable.", "weight": 0.75 },
+            "misspelled_drain_function": { "description": "A typo-named clone of approve/transfer (approvve, tranfer...) touches balances.", "weight": 0.75 },
+            "name_contains_url": { "description": "The token's on-chain name or symbol carries a website, domain or claim-channel link - a phishing-bait token.", "weight": 0.75 },
+            "permit_abuse": { "description": "The permit() implementation transfers tokens instead of just approving.", "weight": 0.75 },
+            "scam_factory_funder": { "description": "The funder has previously bankrolled multiple scam deploys - it's a scam-factory bank.", "weight": 0.75 },
+            "sybil_funded_holders": { "description": "Multiple top holders were funded by the same non-exchange wallet - fake demand, not real holders.", "weight": 0.75 },
+            "//warning": "RektRadar severity: warning",
+            "buy_failed": { "description": "Even buying the token fails in simulation - likely paused or pre-launch.", "weight": 0.7 },
+            "lp_in_pullable_custody": { "description": "The LP sits in a contract that looks like a lock but can release it on demand - a fake lock, not protection.", "weight": 0.7 },
+            "possible_simulation_detection": { "description": "The contract reads block/miner fields that scams use to behave differently inside a simulator.", "weight": 0.7 },
+            "blacklist_function": { "description": "The contract ships a function to ban specific addresses from trading.", "weight": 0.65 },
+            "conditional_transfer": { "description": "The transfer path branches on block.number, block.timestamp or tx.gasprice.", "weight": 0.65 },
+            "lp_not_locked": { "description": "Nothing protects the liquidity: the LP is neither burned nor held by a known locker contract.", "weight": 0.65 },
+            "very_few_holders": { "description": "The token has fewer than 5 unique holders - almost no real distribution yet.", "weight": 0.65 },
+            "liquidity_at_creation": { "description": "The deployer provided the initial liquidity in the same transaction as the deployment.", "weight": 0.6 },
+            "new_wallet": { "description": "The deployer's wallet is less than 7 days old - disposable identity.", "weight": 0.6 },
+            "suspicious_selectors": { "description": "The bytecode exposes function selectors known to enable rugs (sweepETH, removeLiquidityNoFee, etc.).", "weight": 0.6 },
+            "top3_hold_95pct": { "description": "The three largest wallets control more than 95% of the supply.", "weight": 0.6 },
+            "block_dependent_logic": { "description": "Behavior changes past a block number or timestamp comparison.", "weight": 0.55 },
+            "low_liquidity": { "description": "The pool holds very little WETH - slippage explodes on any non-trivial trade.", "weight": 0.55 },
+            "mass_funder": { "description": "The wallet that funded this deployer has bankrolled many other deployers - a scam-funding hub.", "weight": 0.55 },
+            "no_renounce_ownership": { "description": "The contract still has an owner - nothing prevents a future privileged change.", "weight": 0.5 },
+            "single_holder_above_70pct": { "description": "One wallet (excluding the pair) holds more than 70% of the supply.", "weight": 0.5 },
+            "no_dex_pair": { "description": "The token has no liquidity pool - it cannot be traded on any DEX.", "weight": 0.45 },
+            "suspicious_assembly": { "description": "Inline assembly manipulates storage directly (sstore/delegatecall/create2).", "weight": 0.45 },
+            "upgradeable_proxy": { "description": "The contract can delegate or upgrade its logic (delegatecall / upgradeTo).", "weight": 0.45 },
+            "//info": "RektRadar severity: info",
+            "cooldown_mechanism": { "description": "Per-address cooldowns restrict how often a wallet can trade.", "weight": 0.3 },
+            "opcode_gasprice": { "description": "The contract reads the transaction gas price, sometimes used for anti-bot or anti-simulation logic.", "weight": 0.3 },
+            "trading_control": { "description": "The contract has an on/off switch for trading (enableTrading / openTrading).", "weight": 0.3 },
+            "young_wallet": { "description": "The deployer's wallet is 7-30 days old - a softer version of a brand-new wallet.", "weight": 0.25 },
+            "insufficient_data": { "description": "RektRadar couldn't gather enough on-chain data to judge this token - a low score here means 'unknown', not 'safe'.", "weight": 0.2 },
+            "no_graph_data": { "description": "The deployer has no funding-graph history - the wallet's origins cannot be traced.", "weight": 0.15 },
+            "normal_fees": { "description": "Fees are within normal Uniswap range - neutral signal, no specific risk.", "weight": 0.1 },
+            "unverified_bytecode_analyzed": { "description": "No verified source on Etherscan - analysis falls back to bytecode-only signals.", "weight": 0.1 },
+            "//good": "RektRadar severity: good",
+            "lp_burned": { "description": "LP tokens were sent to a burn address - liquidity is locked forever, no rug from here.", "weight": 0.5 },
+            "lp_locked": { "description": "LP tokens are held in a recognized lock contract for a fixed duration.", "weight": 0.5 },
+            "//not_in_catalog": "Seen in live replies but missing from rektradar.io/signals/, so the wording is our reading of the code name.",
+            "whitelisted": { "description": "RektRadar lists this as a known, established token.", "weight": 0.6 },
+            "unverified_contract": { "description": "The contract's source code isn't verified, so it can't be read publicly.", "weight": 0.45 },
+            "unverified_implementation": { "description": "The upgradeable contract's real logic isn't verified, so it can't be read publicly.", "weight": 0.5 },
+            "v4_hook_swap_delta": { "description": "Its Uniswap v4 pool hook can change swap amounts, so trades may not go through at the expected price.", "weight": 0.5 },
+            "v4_single_use_hook": { "description": "Its Uniswap v4 pool uses a custom hook made just for this token.", "weight": 0.35 },
+            "network_pending": { "description": "RektRadar's wallet-network analysis for this token is still pending.", "weight": 0.1 },
+            "v4_pool_found": { "description": "It trades in a Uniswap v4 pool.", "weight": 0.1 }
+          }
+        },
+        "//risk_type": "Unmapped on purpose - RektRadar has no category field, so it stays null rather than guessed. Documented limitation."
+      },
+      "//field_test": "Free-tier evaluation: a fake or malformed address returns a normal low-risk result scoring 0 with NO error, so validate address format before calling or a fake address reads as safe. Score alone is not enough; read flags too. The API's own confidence field was 0 even on a clear scam, hence confidence is derived from score."
+    },
+    {
+      "//no_mapping": "Deliberately no request or response_mapping. The template's shared schema.py already emits DetectionResult, so the mapping layer never loads in template mode.",
+      "//endpoint": "Loopback for dev. Config validation rejects non-https endpoints at save time, so the validator needs a localhost exemption or this will not save.",
+      "id": "template_mock",
+      "name": "MyTemplateDetector",
+      "mode": "template",
+      "status": "live",
+      "endpoint": "http://localhost:9000/detect",
+      "method": "POST",
+      "required_input_type": "address_with_context",
+      "is_llm_based": false,
+      "timeout_seconds": 10
+    },
+    {
+      "//": "Same mapping as rektradar, so the two can't drift apart. No auth - the mock needs no key.",
+      "id": "rektradar_mock",
+      "extends": "rektradar",
+      "name": "RektRadar (local mock)",
+      "status": "live",
+      "endpoint": "http://localhost:9000/v1/token/{{ address }}",
+      "auth": null
+    },
+    {
+      "//": "Graph-based ML model that scores a WALLET from its transaction graph (github.com/adrian-io/ethXpose). Uses the author's free hosted app, no key; a live call took ~46s, hence the long timeout. To self-host instead, run its Docker image on port 8002 (the chat app uses 8000) and set endpoint to http://localhost:8002/api/py/classify.",
+      "id": "ethxpose",
+      "name": "EthXpose",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "https://ethxpose.vercel.app/api/classify",
+      "method": "POST",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": 90,
+      "request": {
+        "body_template": { "wallet_address": "{{ address }}", "model_name": "first_Feather-G_GB.joblib" }
+      },
+      "response_mapping": {
+        "label": {
+          "//": "fraud_probability is 0-1. The middle band is too close to call.",
+          "path": "$.fraud_probability",
+          "ranges": [
+            { "gte": 0.7, "value": "scam" },
+            { "lt": 0.3, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "path": "$.fraud_probability",
+          "measures": "risk"
+        },
+        "//evidence": "None - the reply is a probability plus a transaction graph, with no findings to list."
+      }
+    },
+    {
+      "//": "Static source-code scan for honeypot patterns. Public Cloudflare worker (github.com/Teycir/honeypotscan), 30 requests/min per IP, no key. Only works on contracts with verified source - otherwise it answers HTTP 404.",
+      "id": "honeypotscan",
+      "name": "HoneypotScan",
+      "mode": "generic",
+      "status": "live",
+      "endpoint": "https://honeypotscan-api.teycircoder4.workers.dev/",
+      "method": "POST",
+      "required_input_type": "address",
+      "is_llm_based": false,
+      "timeout_seconds": 20,
+      "request": {
+        "body_template": { "address": "{{ address }}" }
+      },
+      "response_mapping": {
+        "label": {
+          "//": "It only says isHoneypot at 2+ patterns, so exactly 1 pattern reads 'safe' there. That is suspicious, not safe.",
+          "path": "$.isHoneypot",
+          "overrides": [
+            { "path": "$.patterns", "min_items": 1, "max_items": 1, "value": "insufficient_evidence" }
+          ],
+          "value": { "map": { "true": "scam", "false": "not_scam" } },
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "//": "Already confidence in its own verdict: 95 for honeypot, 100 for safe.",
+          "path": "$.confidence",
+          "scale": 100,
+          "measures": "label"
+        },
+        "evidence": {
+          "//": "Descriptions from HoneypotScan's own lib/pattern-explanations.ts. Weights follow its severity: critical 0.9, high 0.75, medium 0.5.",
+          "mode": "code_list",
+          "list_path": "$.patterns",
+          "code_path": "$.name",
+          "default_weight": 0.5,
+          "codes": {
+            "balance_tx_origin": { "description": "balanceOf uses tx.origin to fake the balance it reports.", "weight": 0.9 },
+            "allowance_tx_origin": { "description": "allowance behaves differently depending on tx.origin.", "weight": 0.9 },
+            "transfer_tx_origin": { "description": "transfer checks tx.origin to selectively block transactions.", "weight": 0.9 },
+            "hidden_fee_taxPayer": { "description": "A hidden _taxPayer function uses tx.origin to charge fees.", "weight": 0.75 },
+            "isSuper_tx_origin": { "description": "An _isSuper function grants special privileges based on tx.origin.", "weight": 0.75 },
+            "tx_origin_require": { "description": "A require statement uses tx.origin for access control.", "weight": 0.9 },
+            "tx_origin_if_auth": { "description": "Authentication logic checks tx.origin in if statements.", "weight": 0.75 },
+            "tx_origin_assert": { "description": "An assert statement checks tx.origin.", "weight": 0.9 },
+            "tx_origin_mapping": { "description": "The contract stores tx.origin values in a mapping to track callers.", "weight": 0.5 },
+            "sell_block_pattern": { "description": "Logic explicitly blocks sells to certain recipients.", "weight": 0.9 },
+            "asymmetric_transfer_logic": { "description": "Transfers behave differently for buys and sells.", "weight": 0.75 },
+            "transfer_whitelist_only": { "description": "Transfers only work if the sender or recipient is whitelisted.", "weight": 0.75 },
+            "hidden_sell_tax": { "description": "A hidden sell tax of 95-100% applies.", "weight": 0.9 }
+          }
+        },
+        "//explanation": "Not mapped: its message says 'No honeypot patterns detected' even when 1 pattern was found."
+      }
+    },
+    {
+      "//": "LLM (Claude) reads the verified source and scores it. Uses the author's free hosted app (github.com/amapara27/recon-ethereum-security), no key, ~3 fresh analyses a day (cached repeats are free). Planned, not live: on 2026-10-08 both the hosted app and a local copy failed every analysis because Recon's own code passes 'temperature', which the current Anthropic SDK rejects. On an LLM failure it answers HTTP 200 with only {error}, which fails the label lookup and so reads as an unreadable reply, never a verdict.",
+      "id": "recon",
+      "name": "Recon",
+      "mode": "generic",
+      "status": "planned",
+      "endpoint": "https://reconsecurity.app/api/contract-analyzer",
+      "method": "POST",
+      "required_input_type": "address",
+      "is_llm_based": true,
+      "timeout_seconds": 90,
+      "request": {
+        "body_template": { "address": "{{ address }}" }
+      },
+      "response_mapping": {
+        "label": {
+          "//": "safe_score is 0-100 where 100 = SAFE, so the ranges are the other way round from RektRadar.",
+          "path": "$.safe_score",
+          "ranges": [
+            { "lt": 40, "value": "scam" },
+            { "gte": 70, "value": "not_scam" }
+          ],
+          "fallback": "insufficient_evidence"
+        },
+        "confidence": {
+          "path": "$.safe_score",
+          "scale": 100,
+          "measures": "safety"
+        },
+        "risk_type": { "path": "$.vulnerabilities[0].type" },
+        "evidence": {
+          "mode": "list",
+          "list_path": "$.vulnerabilities",
+          "default_weight": 0.3,
+          "item": {
+            "title": "$.type",
+            "description": "$.description",
+            "weight": "$.severity",
+            "weight_map": { "critical": 0.9, "high": 0.8, "medium": 0.5, "low": 0.2 }
+          }
+        },
+        "explanation": { "path": "$.summary" }
+      }
+    }
+  ],
+  "data_sources": [
+    {
+      "//": "Which API backs which fetcher. Endpoints and constraints only, no credentials.",
+      "//traps": "Two response shapes: account/contract/token return status+message, proxy is JSON-RPC and returns neither, so proxy success is result-vs-error presence. Applying the status check to proxy marks good responses as failed. HTTP 200 is not data: txlist with no transactions returns status '0' / 'No transactions found', a valid empty result; getsourcecode on an unverified contract still returns status '1' / 'OK' and the only tell is SourceCode == ''.",
+      "//api_key": "In .env. Missing key must fail immediately, not continue as None.",
+      "id": "etherscan",
+      "name": "Etherscan",
+      "status": "live",
+      "base_url": "https://api.etherscan.io/v2/api",
+      "chain_id": 1,
+      "api_key": "env:ETHERSCAN_API_KEY",
+      "rate_limit": { "calls_per_second": 5, "calls_per_day": 100000 },
+      "backs": ["contract_fetcher", "tx_history_fetcher", "token_fetcher", "tx_hash_resolver_fetcher"]
+    },
+    {
+      "id": "dexscreener",
+      "name": "DexScreener",
+      "status": "live",
+      "base_url": "https://api.dexscreener.com",
+      "auth": "none",
+      "backs": ["liquidity_fetcher"]
+    },
+    {
+      "//decision_needed": "Open: Etherscan token search or a token list API such as CoinGecko. Best-effort by nature, so ambiguous matches are flagged, not guessed.",
+      "id": "token_name_source",
+      "status": "blocked",
+      "base_url": null,
+      "backs": ["token_name_resolver_fetcher"]
+    }
+  ],
+  "fetchers": [
+    {
+      "//": "Four context fetchers plus two resolvers. Each independently callable and independently failable, so one failure leaves the pipeline running on partial context. Each writes fetcher_provenance: which field it supplied and when.",
+      "//invocation": "Triggered conditionally by the Business Analyser, never all at once. scam_check: a resolver when raw input type does not match what is required, then context fetchers when required_input_type is address_with_context - always true on the Scam Checker path. address_info: only fetchers matching requested_fields.",
+      "id": "contract_fetcher",
+      "data_source": "etherscan",
+      "populates": ["contract"],
+      "status": "live",
+      "//calls": [
+        {
+          "module": "contract",
+          "action": "getsourcecode",
+          "params": { "address": "{{ address }}" },
+          "yields": "SourceCode, ABI, ContractName, CompilerVersion",
+          "//": "verified_source = SourceCode != ''. Unverified returns SourceCode '' and the literal string 'Contract source code not verified' as the ABI."
+        },
+        {
+          "module": "proxy",
+          "action": "eth_getCode",
+          "params": { "address": "{{ address }}", "tag": "latest" },
+          "yields": "runtime bytecode",
+          "//": "Runtime, not constructor bytecode - creation bytecode is silently wrong for any contract with a constructor. is_contract is true only if code is neither 0x nor an EIP-7702 delegation (23 bytes, ef0100 + 20-byte address), which is still a wallet."
+        },
+        {
+          "module": "contract",
+          "action": "getcontractcreation",
+          "params": { "contractaddresses": "{{ address }}" },
+          "yields": "creator, creation_tx",
+          "//": "Up to 5 addresses per call."
+        }
+      ]
+    },
+    {
+      "id": "tx_history_fetcher",
+      "data_source": "etherscan",
+      "populates": ["tx_history"],
+      "status": "live",
+      "//calls": [
+        {
+          "module": "account",
+          "action": "txlist",
+          "params": { "address": "{{ address }}", "page": 1, "offset": 100, "sort": "desc" },
+          "yields": "hash, from, to, value, timestamp, method",
+          "//": "10,000 records per call max, so longer history needs page/offset. Zero-tx address returns status '0' / 'No transactions found' - not an error."
+        }
+      ]
+    },
+    {
+      "id": "token_fetcher",
+      "data_source": "etherscan",
+      "populates": ["tokens"],
+      "status": "live",
+      "//calls": [
+        {
+          "module": "account",
+          "action": "tokentx",
+          "params": { "address": "{{ address }}", "page": 1, "offset": 1000, "sort": "desc" },
+          "yields": "tokenName, tokenSymbol, tokenDecimal, contractAddress - all the metadata tokens[] needs",
+          "//": "No free way to list tokens held: tokeninfo is Pro, tokenbalance needs a known contract. Balance = sum incoming minus outgoing per contractAddress. That is an estimate and must be flagged as one."
+        },
+        {
+          "module": "account",
+          "action": "tokenbalance",
+          "params": { "contractaddress": "{{ token_contract_address }}", "address": "{{ address }}", "tag": "latest" },
+          "optional": true,
+          "//": "Only once a specific token contract is known. Optional cross-check, not a primary call."
+        }
+      ]
+    },
+    {
+      "id": "liquidity_fetcher",
+      "data_source": "dexscreener",
+      "populates": ["liquidity"],
+      "status": "live"
+    },
+    {
+      "id": "tx_hash_resolver_fetcher",
+      "data_source": "etherscan",
+      "populates": [],
+      "role": "input_resolution",
+      "status": "live",
+      "//role": "Resolves input, does not build context. Runs when raw_input.type is tx_hash but an address is required. Output is the address the context fetchers then run against.",
+      "//calls": [
+        {
+          "module": "proxy",
+          "action": "eth_getTransactionByHash",
+          "params": { "txhash": "{{ tx_hash }}" },
+          "yields": "blockHash, from, to, value, input",
+          "//": "JSON-RPC: numeric fields are hex, not the decimal strings txlist uses. Do not parse as decimal."
+        },
+        {
+          "module": "proxy",
+          "action": "eth_getTransactionReceipt",
+          "params": { "txhash": "{{ tx_hash }}" },
+          "conditional": true,
+          "//": "Only for contract-creation txs, where 'to' is null and the deployed address is the receipt's contractAddress."
+        }
+      ]
+    },
+    {
+      "id": "token_name_resolver_fetcher",
+      "data_source": "token_name_source",
+      "populates": [],
+      "role": "input_resolution",
+      "status": "blocked",
+      "//calls": [],
+      "//blocked": "See data_sources.token_name_source. A name matching several contracts stops the pipeline with a clarifying question; the mapping layer is never reached."
+    }
+  ],
+  "cache": {
+    "//": "Explorer APIs are rate limited, so results are held per address for a short TTL and follow-up turns reuse them. 5-10 min is the target; 600 is the top of it. Tune in Week 2.",
+    "enabled": true,
+    "ttl_seconds": 600,
+    "key": ["chain", "address", "fetcher"]
+  }
+}

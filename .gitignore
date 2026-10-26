@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .env
+dexscreener_liquidity_cache.json
+# Detectors added from the chat page ("+ add source"); local to each machine
+config/added_sources.json
