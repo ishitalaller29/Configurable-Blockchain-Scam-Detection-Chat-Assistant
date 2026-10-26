@@ -7,4 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENTRYPOINT ["python", "cli.py"]
+EXPOSE 8000
+
+CMD ["python", "run.py"]
