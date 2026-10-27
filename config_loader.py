@@ -2,13 +2,17 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
+from detector.validator import DetectorConfigError, validate_detector_config
+from schema import DetectorConfig
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "app_config.json"
+_STORE_ONLY_KEYS = ("id", "status", "extends")
 
 # Real environment variables win over .env, so Docker/CI can override it.
 load_dotenv(PROJECT_ROOT / ".env")
@@ -92,6 +96,66 @@ def get_cache_settings(path: Path = CONFIG_PATH) -> CacheSettings:
         return CacheSettings(**block)
     except ValidationError as e:
         raise ConfigError(f"Cache settings are malformed: {e}") from e
+
+
+def _detector_entry(detector_id: str, entries: List[dict]) -> dict:
+    entry = next((e for e in entries if e.get("id") == detector_id), None)
+    if entry is None:
+        known = ", ".join(e.get("id", "?") for e in entries) or "none"
+        raise ConfigError(
+            f"Detector '{detector_id}' is not in config (known: {known})")
+    base_id = entry.get("extends")
+    if not base_id:
+        return entry
+    base = next((e for e in entries if e.get("id") == base_id), None)
+    if base is None:
+        raise ConfigError(
+            f"Detector '{detector_id}' extends '{base_id}', which is not in "
+            "config")
+    if base.get("extends"):
+        raise ConfigError(
+            f"Detector '{detector_id}' extends '{base_id}', which itself "
+            "extends another detector - only one level is allowed")
+    return {**base, **entry}
+
+
+def get_detector(detector_id: str, path: Path = CONFIG_PATH) -> DetectorConfig:
+    entry = _detector_entry(detector_id,
+                            load_config(path).get("detectors", []))
+    mapping_file = {
+        k: v
+        for k, v in entry.items() if k not in _STORE_ONLY_KEYS
+    }
+    try:
+        return validate_detector_config(mapping_file)
+    except DetectorConfigError as e:
+        raise ConfigError(
+            f"Detector '{detector_id}' config is invalid: {e}") from e
+
+
+def list_detectors(path: Path = CONFIG_PATH) -> List[dict]:
+    entries = load_config(path).get("detectors", [])
+    choices = []
+    for raw in entries:
+        entry = _detector_entry(raw.get("id", ""), entries)
+        choices.append({
+            "id": entry.get("id"),
+            "name": entry.get("name"),
+            "status": entry.get("status"),
+            "mode": entry.get("mode"),
+            "is_llm_based": bool(entry.get("is_llm_based")),
+        })
+    return choices
+
+
+def get_active_detector(
+        path: Path = CONFIG_PATH) -> Optional[Tuple[str, DetectorConfig]]:
+    config = load_config(path)
+    detector_id = os.environ.get("ACTIVE_DETECTOR",
+                                 config.get("active_detector") or "")
+    if not detector_id or detector_id.lower() in ("none", "null"):
+        return None
+    return detector_id, get_detector(detector_id, path)
 
 
 def resolve_secret(value: Optional[str]) -> str:
