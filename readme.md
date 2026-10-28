@@ -281,6 +281,61 @@ The chat page is the main screen. The reply above is a beginner-level answer: pl
 | Definitions pill | Shows the glossary terms used in the reply |
 | Copy (Raw evidence) | Copies that hash or address |
 
+## LLM Backend Configuration
+To configure Gemini, OpenAI, or Anthropic as the backend - currently the following files require manual changing to the associated values:
+### llm_config.json
+#### Using Gemini as the Backend 
+The following configuration applies to both if the application is run locally through Uvicorn or through Docker via single click feature - the below setup applies to the config.py
+```
+{
+  "business_analyser": {
+    "provider": "gemini_native",
+    "base_url": null,
+    "api_key": null,
+    "model": "gemini-3.8-flash"
+  },
+  "scam_checker": {
+    "provider": "gemini_native",
+    "base_url": null,
+    "api_key": null,
+    "model": "gemini-3.8-flash"
+  },
+  "forensic_investigator": {
+    "provider": "gemini_native",
+    "base_url": null,
+    "api_key": null,
+    "model": "gemini-3.8-flash"
+  }
+}
+```
+
+### config.py
+#### Local Deployment (Uvicorn) - Using Ollama as the Backend
+Within the config.py file the first function - LLM_CONFIG's values need to be changed to correspond to the associated LLM backend provider, below is the template for Gemini - however, OpenAI and Anthropic will follow similar schemas:
+<b>Gemini</b>
+```
+LLM_CONFIG = dict(
+    base_url=os.getenv("GEMINI_BASE_URL", "http://localhost:11434/v1"),
+    api_key="not-needed",
+    model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+    temperature=0.0,
+    max_tokens=800,
+)
+```
+
+#### Docker (Single Click) Deployment
+Previous "localhost" appendance changes to "ollama", everything else identical.
+<b>Gemini</b>
+```
+LLM_CONFIG = dict(
+    base_url=os.getenv("GEMINI_BASE_URL", "http://ollama:11434/v1"),
+    api_key="not-needed",
+    model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+    temperature=0.0,
+    max_tokens=800,
+)
+```
+
 ## WireFrames
 <b>Source: </b>https://miro.com/app/board/uXjVGwYXzDk=/ <br>
 Final Wireframe Designs are listed under the following subheadings: <br>
